@@ -1,0 +1,87 @@
+MIT License
+
+Copyright (c) 2024 ECG Arrhythmia Detection System
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
+ADDITIONAL NOTICES
+================================================================================
+
+This software uses the following third-party components:
+
+1. MIT-BIH Arrhythmia Database
+   - License: PhysioNet Restricted Health Data License 1.5.0
+   - URL: https://physionet.org/content/mitdb/
+   - Citation: Moody GB, Mark RG. The impact of the MIT-BIH Arrhythmia Database. 
+     IEEE Eng in Med and Biol 20(3):45-50 (May-June 2001).
+
+2. TensorFlow/Keras
+   - License: Apache License 2.0
+   - URL: https://www.tensorflow.org/
+
+3. NumPy, SciPy, Pandas, Scikit-learn
+   - License: BSD License
+   
+4. Plotly
+   - License: MIT License
+
+5. Streamlit
+   - License: Apache License 2.0
+
+6. WFDB Python Package
+   - License: MIT License
+
+================================================================================
+DISCLAIMER
+================================================================================
+
+IMPORTANT: This software is provided for EDUCATIONAL and RESEARCH purposes only.
+
+THIS SOFTWARE IS NOT INTENDED FOR CLINICAL USE OR MEDICAL DIAGNOSIS.
+
+The authors and copyright holders make no warranties about the suitability of 
+this software for any purpose. This software should not be used as a substitute 
+for professional medical advice, diagnosis, or treatment.
+
+Users should:
+- Obtain proper ethics approval for human subjects research
+- Comply with all applicable regulations (HIPAA, GDPR, etc.)
+- Never use for patient care without proper regulatory approval (FDA, CE, etc.)
+- Always seek professional medical advice for health concerns
+
+By using this software, you acknowledge that:
+- You understand this is for educational purposes only
+- You will not use it for clinical diagnosis or patient care
+- You accept all risks and liabilities associated with its use
+- You will comply with all applicable laws and regulations
+
+================================================================================
+SAFETY WARNING
+================================================================================
+
+When using ECG acquisition hardware:
+- Use only battery-powered, isolated devices
+- Never connect to mains-powered equipment while attached to a person
+- Follow all electrical safety guidelines
+- Obtain proper training before use
+- Have emergency procedures in place
+
+================================================================================
+

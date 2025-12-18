@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Data files
+data/mit_bih/
+data/recordings/
+*.dat
+*.hea
+*.atr
+
+# Model files
+models/best_model.h5
+models/trained_model.h5
+models/*.h5
+*.h5
+*.pkl
+*.pickle
+
+# Results and logs
+results/
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Streamlit
+.streamlit/
+
+# Temporary files
+temp/
+tmp/
+test_temp_*
+*.tmp

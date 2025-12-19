@@ -7,8 +7,101 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, models, regularizers
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+import tensorflow.keras.backend as K
 import numpy as np
 from typing import Tuple, Optional
+
+
+class FocalLoss(keras.losses.Loss):
+    """
+    Focal Loss for addressing extreme class imbalance
+    
+    Focuses training on hard-to-classify examples by down-weighting
+    easy examples. This is particularly useful for ECG classification
+    where some classes (Fusion, Unknown) are severely underrepresented.
+    
+    Formula: FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+    
+    Args:
+        alpha: Weighting factor for class balance (0-1)
+        gamma: Focusing parameter (higher = more focus on hard examples)
+               Recommended: 2.0 for extreme imbalance
+    
+    Reference:
+        Lin et al. "Focal Loss for Dense Object Detection" (2017)
+    """
+    def __init__(self, alpha=0.25, gamma=2.0, name='focal_loss', **kwargs):
+        # Accept all keras.losses.Loss parameters
+        super().__init__(name=name, **kwargs)
+        self.alpha = alpha
+        self.gamma = gamma
+    
+    def call(self, y_true, y_pred):
+        # Convert y_true to one-hot if needed
+        y_true = tf.cast(y_true, tf.int32)
+        y_true = tf.one_hot(y_true, depth=tf.shape(y_pred)[-1])
+        y_true = tf.cast(y_true, tf.float32)
+        
+        # Clip predictions to prevent log(0)
+        epsilon = K.epsilon()
+        y_pred = K.clip(y_pred, epsilon, 1.0 - epsilon)
+        
+        # Calculate focal loss
+        cross_entropy = -y_true * K.log(y_pred)
+        loss = self.alpha * K.pow(1 - y_pred, self.gamma) * cross_entropy
+        
+        return K.mean(K.sum(loss, axis=-1))
+    
+    def get_config(self):
+        """Return configuration for serialization"""
+        config = super().get_config()
+        config.update({
+            'alpha': self.alpha,
+            'gamma': self.gamma
+        })
+        return config
+    
+    @classmethod
+    def from_config(cls, config):
+        """Create instance from configuration"""
+        return cls(**config)
+
+
+class F1ScoreCallback(keras.callbacks.Callback):
+    """
+    Monitor F1-score for minority classes during training
+    
+    This callback prints F1-scores for all classes every N epochs
+    to help monitor performance on underrepresented classes.
+    """
+    def __init__(self, validation_data, class_names, print_every=10):
+        super().__init__()
+        self.validation_data = validation_data
+        self.class_names = class_names
+        self.print_every = print_every
+    
+    def on_epoch_end(self, epoch, logs=None):
+        if (epoch + 1) % self.print_every == 0:
+            X_val, y_val = self.validation_data
+            y_pred = np.argmax(self.model.predict(X_val, verbose=0), axis=1)
+            
+            from sklearn.metrics import classification_report
+            report = classification_report(
+                y_val, y_pred,
+                target_names=self.class_names,
+                output_dict=True,
+                zero_division=0
+            )
+            
+            print(f"\n{'='*70}")
+            print(f"[Epoch {epoch+1}] F1-Scores by Class:")
+            print(f"{'='*70}")
+            for class_name in self.class_names:
+                f1 = report[class_name]['f1-score']
+                recall = report[class_name]['recall']
+                precision = report[class_name]['precision']
+                print(f"  {class_name:20s} - F1: {f1:.3f} | Precision: {precision:.3f} | Recall: {recall:.3f}")
+            print(f"{'='*70}\n")
 
 
 def build_bilstm_model(input_shape: Tuple[int, int] = (216, 1), 
@@ -134,8 +227,269 @@ def build_enhanced_bilstm_model(input_shape: Tuple[int, int] = (216, 1),
     return model
 
 
+def build_cnn_lstm_model(input_shape: Tuple[int, int] = (216, 1),
+                         num_classes: int = 5,
+                         l2_reg: float = 0.001) -> keras.Model:
+    """
+    Build CNN-LSTM hybrid model for ECG classification
+    
+    This architecture uses CNN layers to extract local morphological features
+    (QRS complex, P-wave, T-wave patterns) and LSTM layers to capture temporal
+    dependencies between heartbeats. This approach has shown state-of-the-art
+    results on MIT-BIH dataset.
+    
+    Architecture:
+        Input (216x1)
+        -> Conv1D(64) -> BatchNorm -> ReLU -> SpatialDropout -> MaxPool
+        -> Conv1D(128) -> BatchNorm -> ReLU -> SpatialDropout -> MaxPool
+        -> Bi-LSTM(64) -> Dropout
+        -> Bi-LSTM(32) -> Dropout
+        -> Dense(64) -> Dropout
+        -> Dense(5, softmax)
+    
+    Args:
+        input_shape: Shape of input (timesteps, features)
+        num_classes: Number of output classes
+        l2_reg: L2 regularization factor
+    
+    Returns:
+        Keras model
+    """
+    inputs = layers.Input(shape=input_shape, name='ecg_input')
+    
+    # First Convolutional Block
+    # Extract low-level morphological features
+    x = layers.Conv1D(
+        filters=64,
+        kernel_size=5,
+        padding='same',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        name='conv1d_1'
+    )(inputs)
+    x = layers.BatchNormalization(name='bn_1')(x)
+    x = layers.Activation('relu', name='relu_1')(x)
+    x = layers.SpatialDropout1D(0.5, name='spatial_dropout_1')(x)
+    x = layers.MaxPooling1D(pool_size=2, name='maxpool_1')(x)
+    
+    # Second Convolutional Block
+    # Extract higher-level features
+    x = layers.Conv1D(
+        filters=128,
+        kernel_size=3,
+        padding='same',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        name='conv1d_2'
+    )(x)
+    x = layers.BatchNormalization(name='bn_2')(x)
+    x = layers.Activation('relu', name='relu_2')(x)
+    x = layers.SpatialDropout1D(0.5, name='spatial_dropout_2')(x)
+    x = layers.MaxPooling1D(pool_size=2, name='maxpool_2')(x)
+    
+    # First Bidirectional LSTM
+    # Model temporal dependencies
+    x = layers.Bidirectional(
+        layers.LSTM(
+            64,
+            return_sequences=True,
+            kernel_regularizer=regularizers.l2(l2_reg),
+            recurrent_regularizer=regularizers.l2(l2_reg),
+            name='lstm_1'
+        ),
+        name='bidirectional_lstm_1'
+    )(x)
+    x = layers.Dropout(0.5, name='dropout_1')(x)  # Increased from 0.4
+    
+    # Second Bidirectional LSTM
+    # Further temporal processing
+    x = layers.Bidirectional(
+        layers.LSTM(
+            32,
+            return_sequences=False,
+            kernel_regularizer=regularizers.l2(l2_reg),
+            recurrent_regularizer=regularizers.l2(l2_reg),
+            name='lstm_2'
+        ),
+        name='bidirectional_lstm_2'
+    )(x)
+    x = layers.Dropout(0.5, name='dropout_2')(x)  # Increased from 0.4
+    
+    # Dense layer
+    x = layers.Dense(
+        64,
+        activation='relu',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        name='dense_1'
+    )(x)
+    x = layers.Dropout(0.4, name='dropout_3')(x)  # Increased from 0.3
+    
+    # Output layer
+    outputs = layers.Dense(num_classes, activation='softmax', name='output')(x)
+    
+    model = models.Model(inputs=inputs, outputs=outputs, name='CNN_LSTM_ECG')
+    
+    return model
+
+
+def build_rescnn_lstm_model(input_shape: Tuple[int, int] = (216, 1),
+                             num_classes: int = 5,
+                             l2_reg: float = 0.001) -> keras.Model:
+    """
+    Build ResNet-style CNN-LSTM model with residual connections
+    
+    This enhanced architecture adds residual (skip) connections to help with
+    gradient flow and allow the network to learn identity mappings when needed.
+    Residual connections have been shown to improve training of deep networks.
+    
+    Architecture:
+        Input (216x1)
+        -> Conv1D(64) -> BatchNorm -> ReLU -> [Residual Block 1]
+        -> Conv1D(128) -> BatchNorm -> ReLU -> MaxPool -> [Residual Block 2]
+        -> Conv1D(128) -> BatchNorm -> ReLU -> MaxPool
+        -> Bi-LSTM(64) -> Dropout
+        -> Bi-LSTM(32) -> Dropout
+        -> Dense(64) -> Dropout
+        -> Dense(5, softmax)
+    
+    Args:
+        input_shape: Shape of input (timesteps, features)
+        num_classes: Number of output classes
+        l2_reg: L2 regularization factor
+    
+    Returns:
+        Keras model
+    """
+    inputs = layers.Input(shape=input_shape, name='ecg_input')
+    
+    # Initial convolution
+    x = layers.Conv1D(
+        filters=64,
+        kernel_size=7,
+        padding='same',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        name='conv1d_init'
+    )(inputs)
+    x = layers.BatchNormalization(name='bn_init')(x)
+    x = layers.Activation('relu', name='relu_init')(x)
+    
+    # Residual Block 1
+    residual = x
+    x = layers.Conv1D(
+        filters=64,
+        kernel_size=5,
+        padding='same',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        name='conv1d_1a'
+    )(x)
+    x = layers.BatchNormalization(name='bn_1a')(x)
+    x = layers.Activation('relu', name='relu_1a')(x)
+    x = layers.SpatialDropout1D(0.3, name='spatial_dropout_1a')(x)
+    
+    x = layers.Conv1D(
+        filters=64,
+        kernel_size=5,
+        padding='same',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        name='conv1d_1b'
+    )(x)
+    x = layers.BatchNormalization(name='bn_1b')(x)
+    
+    # Add residual connection
+    x = layers.Add(name='residual_add_1')([x, residual])
+    x = layers.Activation('relu', name='relu_1b')(x)
+    x = layers.MaxPooling1D(pool_size=2, name='maxpool_1')(x)
+    
+    # Residual Block 2
+    residual = layers.Conv1D(
+        filters=128,
+        kernel_size=1,
+        padding='same',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        name='conv1d_residual_proj'
+    )(x)
+    
+    x = layers.Conv1D(
+        filters=128,
+        kernel_size=3,
+        padding='same',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        name='conv1d_2a'
+    )(x)
+    x = layers.BatchNormalization(name='bn_2a')(x)
+    x = layers.Activation('relu', name='relu_2a')(x)
+    x = layers.SpatialDropout1D(0.3, name='spatial_dropout_2a')(x)
+    
+    x = layers.Conv1D(
+        filters=128,
+        kernel_size=3,
+        padding='same',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        name='conv1d_2b'
+    )(x)
+    x = layers.BatchNormalization(name='bn_2b')(x)
+    
+    # Add residual connection
+    x = layers.Add(name='residual_add_2')([x, residual])
+    x = layers.Activation('relu', name='relu_2b')(x)
+    x = layers.MaxPooling1D(pool_size=2, name='maxpool_2')(x)
+    
+    # Additional conv layer for feature refinement
+    x = layers.Conv1D(
+        filters=128,
+        kernel_size=3,
+        padding='same',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        name='conv1d_3'
+    )(x)
+    x = layers.BatchNormalization(name='bn_3')(x)
+    x = layers.Activation('relu', name='relu_3')(x)
+    x = layers.SpatialDropout1D(0.4, name='spatial_dropout_3')(x)
+    
+    # First Bidirectional LSTM
+    x = layers.Bidirectional(
+        layers.LSTM(
+            64,
+            return_sequences=True,
+            kernel_regularizer=regularizers.l2(l2_reg),
+            recurrent_regularizer=regularizers.l2(l2_reg),
+            name='lstm_1'
+        ),
+        name='bidirectional_lstm_1'
+    )(x)
+    x = layers.Dropout(0.4, name='dropout_1')(x)
+    
+    # Second Bidirectional LSTM
+    x = layers.Bidirectional(
+        layers.LSTM(
+            32,
+            return_sequences=False,
+            kernel_regularizer=regularizers.l2(l2_reg),
+            recurrent_regularizer=regularizers.l2(l2_reg),
+            name='lstm_2'
+        ),
+        name='bidirectional_lstm_2'
+    )(x)
+    x = layers.Dropout(0.4, name='dropout_2')(x)
+    
+    # Dense layer
+    x = layers.Dense(
+        64,
+        activation='relu',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        name='dense_1'
+    )(x)
+    x = layers.Dropout(0.3, name='dropout_3')(x)
+    
+    # Output layer
+    outputs = layers.Dense(num_classes, activation='softmax', name='output')(x)
+    
+    model = models.Model(inputs=inputs, outputs=outputs, name='ResCNN_LSTM_ECG')
+    
+    return model
+
+
 def compile_model(model: keras.Model,
                   learning_rate: float = 0.001,
+                  use_focal_loss: bool = True,
                   class_weights: Optional[dict] = None) -> keras.Model:
     """
     Compile model with optimizer and loss function
@@ -143,6 +497,8 @@ def compile_model(model: keras.Model,
     Args:
         model: Keras model to compile
         learning_rate: Learning rate for Adam optimizer
+        use_focal_loss: Use Focal Loss instead of standard cross-entropy
+                       (Recommended for handling extreme class imbalance)
         class_weights: Class weights for handling imbalance
     
     Returns:
@@ -151,13 +507,18 @@ def compile_model(model: keras.Model,
     # Adam optimizer with learning rate
     optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
     
-    # Categorical crossentropy for multi-class classification
-    loss = keras.losses.SparseCategoricalCrossentropy()
+    # Use Focal Loss for better handling of class imbalance
+    # This significantly improves performance on minority classes (F, Q)
+    if use_focal_loss:
+        loss = FocalLoss(alpha=0.25, gamma=2.0)
+        print("✓ Using Focal Loss for extreme class imbalance handling")
+    else:
+        loss = keras.losses.SparseCategoricalCrossentropy()
+        print("✓ Using standard Cross-Entropy loss")
     
     # Metrics
     metrics = [
         keras.metrics.SparseCategoricalAccuracy(name='accuracy'),
-        keras.metrics.SparseCategoricalCrossentropy(name='crossentropy'),
     ]
     
     model.compile(
@@ -171,7 +532,9 @@ def compile_model(model: keras.Model,
 
 def get_callbacks(model_save_path: str = './models/best_model.h5',
                   patience: int = 10,
-                  min_delta: float = 0.001) -> list:
+                  min_delta: float = 0.001,
+                  validation_data: Optional[tuple] = None,
+                  class_names: Optional[list] = None) -> list:
     """
     Get training callbacks
     
@@ -179,6 +542,8 @@ def get_callbacks(model_save_path: str = './models/best_model.h5',
         model_save_path: Path to save best model
         patience: Patience for early stopping
         min_delta: Minimum change to consider as improvement
+        validation_data: Tuple of (X_val, y_val) for F1 monitoring
+        class_names: List of class names for F1 monitoring
     
     Returns:
         List of callbacks
@@ -211,6 +576,16 @@ def get_callbacks(model_save_path: str = './models/best_model.h5',
             verbose=1
         )
     ]
+    
+    # Add F1-score monitoring if validation data provided
+    if validation_data is not None and class_names is not None:
+        callbacks.append(
+            F1ScoreCallback(
+                validation_data=validation_data,
+                class_names=class_names,
+                print_every=10
+            )
+        )
     
     return callbacks
 
@@ -270,7 +645,11 @@ def create_model(model_type: str = 'standard',
     Create and compile model
     
     Args:
-        model_type: Type of model ('standard' or 'enhanced')
+        model_type: Type of model architecture
+            - 'standard': Basic Bi-LSTM (original)
+            - 'enhanced': Bi-LSTM with attention mechanism
+            - 'cnn_lstm': CNN-LSTM hybrid (RECOMMENDED for best performance)
+            - 'rescnn_lstm': ResNet-style CNN-LSTM with residual connections
         input_shape: Input shape
         num_classes: Number of classes
         learning_rate: Learning rate
@@ -282,8 +661,13 @@ def create_model(model_type: str = 'standard',
         model = build_bilstm_model(input_shape, num_classes)
     elif model_type == 'enhanced':
         model = build_enhanced_bilstm_model(input_shape, num_classes)
+    elif model_type == 'cnn_lstm':
+        model = build_cnn_lstm_model(input_shape, num_classes)
+    elif model_type == 'rescnn_lstm':
+        model = build_rescnn_lstm_model(input_shape, num_classes)
     else:
-        raise ValueError(f"Unknown model type: {model_type}")
+        raise ValueError(f"Unknown model type: {model_type}. "
+                        f"Choose from: 'standard', 'enhanced', 'cnn_lstm', 'rescnn_lstm'")
     
     model = compile_model(model, learning_rate)
     print_model_summary(model)
@@ -308,4 +692,5 @@ if __name__ == "__main__":
     print(f"Predicted class: {np.argmax(y_pred[0])}")
     
     print("\nModel created successfully!")
+
 

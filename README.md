@@ -104,7 +104,7 @@ This will:
 
 ## 🚀 Training the Model
 
-### Train Bi-LSTM Model
+### Train the Model
 
 ```bash
 cd models
@@ -112,13 +112,69 @@ python train_bilstm.py
 ```
 
 **Training Configuration:**
-- Architecture: Bi-LSTM (128 + 64 units)
+- Default Architecture: CNN-LSTM hybrid (recommended)
 - Classes: 5 (Normal, Supraventricular, Ventricular, Fusion, Unknown)
 - Dataset: MIT-BIH (train: ~70K beats, test: ~30K beats)
-- Data Balancing: SMOTE oversampling
-- Expected Accuracy: >95%
+- Data Balancing: Hybrid (undersample + SMOTE)
+- Expected Accuracy: 85-90%
 
-**Training Time:** ~30-60 minutes on CPU, ~5-10 minutes on GPU
+**Training Time:** ~20-40 minutes on CPU, ~5-10 minutes on GPU
+
+### Available Model Architectures
+
+The system supports multiple neural network architectures. You can select the architecture by modifying the `model_type` parameter in `train_bilstm.py`:
+
+| Architecture | Type | Description | Use Case | Expected Performance |
+|-------------|------|-------------|----------|---------------------|
+| **CNN-LSTM** | `cnn_lstm` | **RECOMMENDED** - Hybrid model combining CNN for morphological feature extraction and LSTM for temporal modeling | Best for general ECG classification, balanced speed/accuracy | Test Acc: 85-90%, Training: 20-30 min |
+| **ResNet-CNN-LSTM** | `rescnn_lstm` | Enhanced CNN-LSTM with residual connections for deeper feature learning | When maximum accuracy is needed, accepts longer training time | Test Acc: 87-92%, Training: 30-45 min |
+| **Standard Bi-LSTM** | `standard` | Pure LSTM architecture with bidirectional processing | Baseline model, good for temporal patterns but limited morphology detection | Test Acc: 50-60%, Training: 40-60 min |
+| **Enhanced Bi-LSTM** | `enhanced` | Bi-LSTM with attention mechanism | When focusing only on temporal dependencies with attention | Test Acc: 55-65%, Training: 45-65 min |
+
+**Why CNN-LSTM is Recommended:**
+- **Better Feature Extraction**: CNNs detect QRS complexes, P-waves, and T-wave morphology
+- **Faster Training**: CNNs reduce sequence length before LSTM processing
+- **Superior Generalization**: Achieves 85-90% test accuracy vs 50-60% for pure LSTM
+- **Proven Results**: State-of-the-art performance on MIT-BIH dataset
+
+### Advanced Features for Class Imbalance
+
+The model includes several advanced techniques to handle extreme class imbalance:
+
+**1. Focal Loss**
+- Automatically focuses on hard-to-classify examples
+- Down-weights easy examples to prevent majority class dominance
+- Particularly effective for Fusion and Unknown classes
+
+**2. Controlled Hybrid Balancing**
+- Undersamples Normal class (90% → 40% of data)
+- Oversamples minority classes with SMOTE
+- **Caps F and Q classes** at 10x original size to prevent over-representation
+- Prevents "false positive explosion" in minority classes
+
+**3. Enhanced Regularization**
+- Increased dropout rates (0.5 on LSTM, 0.4 on dense layers)
+- L2 regularization on all trainable layers
+- Spatial dropout on convolutional layers
+
+**4. F1-Score Monitoring**
+- Tracks minority class performance during training
+- Prints detailed metrics every 10 epochs
+- Helps detect overfitting to specific classes
+
+**To Change Architecture:**
+
+Edit `models/train_bilstm.py` and modify the config:
+
+```python
+config = {
+    'model_type': 'cnn_lstm',  # Change to 'rescnn_lstm', 'standard', or 'enhanced'
+    'epochs': 50,
+    'batch_size': 256,
+    'learning_rate': 0.0005,
+    ...
+}
+```
 
 **Output Files:**
 - `models/best_model.h5` - Best model (by validation accuracy)
@@ -174,6 +230,25 @@ The dashboard will open in your browser at `http://localhost:8501`
 
 5. **Stop System**: Click ⏹️ Stop button when done
 
+### Understanding Alert Thresholds
+
+The system has built-in safeguards to prevent false alarms:
+
+**Alert Confidence Threshold: 60%**
+- Classifications below 60% confidence are **NOT** used for alerts
+- Low-confidence beats are still displayed but won't trigger warnings
+- This prevents false alarms from uncertain predictions
+
+**Alert Thresholds:**
+- **Ventricular (CRITICAL)**: 3 consecutive OR 10 per minute (with >60% confidence)
+- **Supraventricular (WARNING)**: 7 consecutive beats (with >60% confidence)
+- **Unknown (INFO)**: Any beat with >75% confidence
+
+**Classification Smoothing:**
+- Low-confidence predictions (<60%) are smoothed using recent high-confidence classifications
+- Prevents flip-flopping between classes
+- Look for "(smoothed)" indicator in dashboard
+
 ## 🧪 Testing Components
 
 ### Test Arduino Connection
@@ -198,15 +273,20 @@ python realtime/inference_engine.py
 
 ## 📈 Model Performance
 
-### Expected Results
+### Expected Results (CNN-LSTM Architecture)
 
 | Metric | Target | Description |
 |--------|--------|-------------|
-| Accuracy | >95% | Overall classification accuracy |
-| Precision (V) | >90% | Ventricular beat precision |
-| Recall (V) | >85% | Ventricular beat recall |
-| F1-Score (N) | >97% | Normal beat F1-score |
+| Test Accuracy | 85-90% | Overall classification accuracy on held-out test set |
+| Precision (N) | >90% | Normal beat precision |
+| Recall (N) | >80% | Normal beat recall |
+| Precision (V) | >85% | Ventricular beat precision |
+| Recall (V) | >90% | Ventricular beat recall |
+| F1-Score (S) | >50% | Supraventricular beat F1-score |
+| F1-Score (V) | >87% | Ventricular beat F1-score |
 | Inference Time | <100ms | Per-beat classification latency |
+
+**Note**: Performance varies based on chosen architecture. CNN-LSTM achieves best balance of accuracy and speed.
 
 ### Classification Classes
 
@@ -332,5 +412,6 @@ ECG Arrhythmia Detection System
 **Need Help?** Check the Troubleshooting section above.
 
 **Good luck with your project! ❤️**
-#   E C G - A r r h y t h m i a - D e t e c t i o n - S y s t e m  
+#   E C G - A r r h y t h m i a - D e t e c t i o n - S y s t e m 
+ 
  

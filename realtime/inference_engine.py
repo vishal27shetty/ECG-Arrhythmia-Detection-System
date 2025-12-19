@@ -21,6 +21,20 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from preprocessing.filters import ECGFilter
 from preprocessing.signal_processing import PanTompkinsDetector, BeatSegmenter
 
+# Import custom loss function
+try:
+    from models.model_architecture import FocalLoss
+except ImportError:
+    # Fallback if running from different directory
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "model_architecture",
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "model_architecture.py")
+    )
+    model_arch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(model_arch)
+    FocalLoss = model_arch.FocalLoss
+
 
 # Class names
 CLASS_NAMES = ['N', 'S', 'V', 'F', 'Q']
@@ -55,20 +69,26 @@ class AlertManager:
         Returns:
             Alert dictionary if alert triggered, None otherwise
         """
-        self.recent_beats.append({'class': class_label, 'time': timestamp})
+        # CRITICAL FIX: Only add beat if confidence is reasonable
+        # This prevents false alarms from low-confidence predictions
+        MIN_CONFIDENCE_FOR_ALERTS = 0.60  # 60% minimum confidence
+        
+        if confidence >= MIN_CONFIDENCE_FOR_ALERTS:
+            self.recent_beats.append({'class': class_label, 'time': timestamp, 'confidence': confidence})
         
         alert = None
         
-        # Check ventricular beats
-        if class_label == 'V':
+        # Check ventricular beats (only if high confidence)
+        if class_label == 'V' and confidence >= MIN_CONFIDENCE_FOR_ALERTS:
             self.alert_state['V']['consecutive'] += 1
             
-            # Count V beats in last minute
-            v_count = sum(1 for beat in self.recent_beats if beat['class'] == 'V')
+            # Count HIGH-CONFIDENCE V beats in last minute
+            v_count = sum(1 for beat in self.recent_beats 
+                         if beat['class'] == 'V' and beat.get('confidence', 0) >= MIN_CONFIDENCE_FOR_ALERTS)
             self.alert_state['V']['per_minute'] = v_count
             
-            # Alert conditions for ventricular beats
-            if (self.alert_state['V']['consecutive'] >= 3 or v_count >= 6):
+            # Alert conditions for ventricular beats (stricter thresholds)
+            if (self.alert_state['V']['consecutive'] >= 3 or v_count >= 10):
                 if timestamp - self.alert_state['V']['last_alert'] >= self.min_alert_interval:
                     alert = {
                         'type': 'CRITICAL',
@@ -82,12 +102,12 @@ class AlertManager:
         else:
             self.alert_state['V']['consecutive'] = 0
         
-        # Check supraventricular beats
-        if class_label == 'S':
+        # Check supraventricular beats (only if high confidence)
+        if class_label == 'S' and confidence >= MIN_CONFIDENCE_FOR_ALERTS:
             self.alert_state['S']['consecutive'] += 1
             
             # Alert if sustained episode (>5 consecutive)
-            if self.alert_state['S']['consecutive'] >= 5:
+            if self.alert_state['S']['consecutive'] >= 7:  # Increased threshold
                 if timestamp - self.alert_state['S']['last_alert'] >= self.min_alert_interval:
                     alert = {
                         'type': 'WARNING',
@@ -101,8 +121,8 @@ class AlertManager:
         else:
             self.alert_state['S']['consecutive'] = 0
         
-        # Check for unknown beats (potential issue)
-        if class_label == 'Q' and confidence > 0.7:
+        # Check for unknown beats (only if very high confidence)
+        if class_label == 'Q' and confidence > 0.75:
             alert = {
                 'type': 'INFO',
                 'class': 'Unknown',
@@ -145,10 +165,21 @@ class RealtimeInferenceEngine:
         self.sampling_rate = sampling_rate
         self.beat_length = beat_length
         
-        # Load model
+        # Load model with custom objects
         print(f"Loading model from {model_path}...")
-        self.model = keras.models.load_model(model_path)
-        print("Model loaded successfully!")
+        try:
+            # Try loading with custom objects (for models trained with Focal Loss)
+            self.model = keras.models.load_model(
+                model_path,
+                custom_objects={'FocalLoss': FocalLoss}
+            )
+            print("Model loaded successfully (with Focal Loss)!")
+        except Exception as e:
+            # Fallback: try loading without custom objects (for older models)
+            print(f"Warning: Could not load with Focal Loss ({str(e)})")
+            print("Attempting to load without custom objects...")
+            self.model = keras.models.load_model(model_path)
+            print("Model loaded successfully!")
         
         # Initialize processing components
         self.ecg_filter = ECGFilter(sampling_rate=sampling_rate)
@@ -166,6 +197,9 @@ class RealtimeInferenceEngine:
         # Results
         self.classification_results = deque(maxlen=1000)
         self.detected_peaks = []
+        
+        # Classification smoothing (prevent flip-flopping)
+        self.recent_predictions = deque(maxlen=5)  # Track last 5 predictions
         
         # Statistics
         self.total_beats_classified = 0
@@ -234,7 +268,31 @@ class RealtimeInferenceEngine:
         for i, pred in enumerate(predictions):
             class_idx = np.argmax(pred)
             confidence = pred[class_idx]
-            class_label = CLASS_NAMES[class_idx]
+            raw_class_label = CLASS_NAMES[class_idx]
+            
+            # SMOOTHING: Apply majority voting on recent predictions if confidence is low
+            self.recent_predictions.append({'class': raw_class_label, 'confidence': confidence})
+            
+            # Use smoothing if current confidence is low (<60%)
+            if confidence < 0.60 and len(self.recent_predictions) >= 3:
+                # Majority vote from recent high-confidence predictions
+                high_conf_recent = [p['class'] for p in self.recent_predictions 
+                                   if p['confidence'] >= 0.60]
+                if high_conf_recent:
+                    from collections import Counter
+                    majority_class = Counter(high_conf_recent).most_common(1)[0][0]
+                    class_label = majority_class
+                    # Mark as smoothed
+                    is_smoothed = True
+                else:
+                    class_label = raw_class_label
+                    is_smoothed = False
+            else:
+                class_label = raw_class_label
+                is_smoothed = False
+            
+            # Get final class index
+            class_idx = CLASS_NAMES.index(class_label) if class_label in CLASS_NAMES else class_idx
             
             result = {
                 'timestamp': time.time(),
@@ -242,13 +300,15 @@ class RealtimeInferenceEngine:
                 'class_full': CLASS_FULL_NAMES[class_idx],
                 'confidence': float(confidence),
                 'probabilities': pred.tolist(),
-                'beat_data': beats[i].tolist()
+                'beat_data': beats[i].tolist(),
+                'smoothed': is_smoothed,
+                'raw_class': raw_class_label
             }
             
             self.classification_results.append(result)
             self.total_beats_classified += 1
             
-            # Check for alerts
+            # Check for alerts (use smoothed classification)
             alert = self.alert_manager.add_beat(class_label, confidence, time.time())
             if alert:
                 result['alert'] = alert
@@ -328,4 +388,5 @@ def test_inference_engine():
 
 if __name__ == "__main__":
     test_inference_engine()
+
 

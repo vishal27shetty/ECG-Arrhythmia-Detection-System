@@ -302,3 +302,4 @@ def test_serial_reader():
 if __name__ == "__main__":
     test_serial_reader()
 
+

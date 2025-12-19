@@ -169,70 +169,93 @@ class ECGModelTrainer:
         return X_train, y_train
     
     def _apply_hybrid_balancing(self, X_train, y_train):
-        """Apply hybrid: undersample majority + SMOTE minorities"""
-        print("\nApplying hybrid balancing (undersample + SMOTE)...")
+        """Apply controlled hybrid balancing with caps to prevent over-representation"""
+        print("\nApplying controlled hybrid balancing...")
         
         from collections import Counter
         from imblearn.over_sampling import SMOTE
         from imblearn.under_sampling import RandomUnderSampler
-        from imblearn.pipeline import Pipeline
         
         counter = Counter(y_train)
-        min_samples = min(counter.values())
+        total = len(y_train)
         
-        # Strategy 1: First undersample the majority class (N) to reduce dominance
-        # Target: Keep N at ~40% of dataset instead of 90%
-        majority_target = int(len(y_train) * 0.4)
+        print("\nOriginal distribution:")
+        for class_idx in sorted(counter.keys()):
+            count = counter[class_idx]
+            pct = (count / total) * 100
+            print(f"  {self.class_names[class_idx]}: {count} ({pct:.1f}%)")
         
-        # Strategy 2: Then oversample minorities to match a reasonable target
-        # For very small classes, set a minimum target
-        min_target = max(1000, min_samples * 10)
+        # Strategy: Create more balanced distribution with CAPS
+        # Target ratios: N:S:V:F:Q = 40:15:15:5:5 (percentage)
+        # This prevents "Fusion explosion" by capping F and Q classes
         
-        # Define sampling strategy
-        undersample_strategy = {0: majority_target}  # Class N (Normal)
+        target_distribution = {
+            0: int(total * 0.40),  # Normal - undersample to 40%
+            1: int(total * 0.15),  # Supraventricular - oversample to 15%
+            2: int(total * 0.15),  # Ventricular - oversample to 15%
+            3: int(total * 0.05),  # Fusion - oversample to 5% MAX
+            4: int(total * 0.05),  # Unknown - oversample to 5% MAX
+        }
         
-        # Calculate SMOTE target for each minority class
-        oversample_strategy = {}
-        for class_idx, count in counter.items():
-            if class_idx != 0:  # Not the majority class
-                if count < min_target:
-                    oversample_strategy[class_idx] = min_target
+        # CRITICAL: Cap very small classes to avoid over-representation
+        # If target is more than 10x original, cap it to prevent model bias
+        for class_idx in [3, 4]:  # F and Q classes
+            original_count = counter[class_idx]
+            target_count = target_distribution[class_idx]
+            max_allowed = original_count * 10
+            
+            if target_count > max_allowed:
+                print(f"  ⚠️ Capping {self.class_names[class_idx]}: {target_count} → {max_allowed} (10x limit)")
+                target_distribution[class_idx] = max_allowed
         
         X_train_2d = X_train.reshape(X_train.shape[0], -1)
         
         try:
-            # Adjust k_neighbors
+            # Step 1: Undersample majority class (Normal)
+            print("\n  Step 1: Undersampling majority class...")
+            undersampler = RandomUnderSampler(
+                sampling_strategy={0: target_distribution[0]},
+                random_state=42
+            )
+            X_resampled, y_resampled = undersampler.fit_resample(X_train_2d, y_train)
+            
+            # Step 2: Oversample minorities with SMOTE
+            counter_after = Counter(y_resampled)
+            min_samples = min(counter_after.values())
             k_neighbors = min(5, max(1, min_samples - 1))
             
-            # Create pipeline: undersample then oversample
+            print(f"  Step 2: Oversampling minorities (k_neighbors={k_neighbors})...")
+            
+            oversample_strategy = {}
+            for class_idx in [1, 2, 3, 4]:
+                current = counter_after[class_idx]
+                target = target_distribution[class_idx]
+                if current < target:
+                    oversample_strategy[class_idx] = target
+            
             if oversample_strategy:
-                pipeline = Pipeline([
-                    ('undersample', RandomUnderSampler(sampling_strategy=undersample_strategy, random_state=42)),
-                    ('oversample', SMOTE(sampling_strategy=oversample_strategy, random_state=42, k_neighbors=k_neighbors))
-                ])
-            else:
-                # Only undersample if SMOTE not needed
-                pipeline = Pipeline([
-                    ('undersample', RandomUnderSampler(sampling_strategy=undersample_strategy, random_state=42))
-                ])
+                smote = SMOTE(
+                    sampling_strategy=oversample_strategy,
+                    random_state=42,
+                    k_neighbors=k_neighbors
+                )
+                X_resampled, y_resampled = smote.fit_resample(X_resampled, y_resampled)
             
-            X_train_balanced, y_train_balanced = pipeline.fit_resample(X_train_2d, y_train)
+            X_train = X_resampled.reshape(-1, 216, 1)
+            y_train = y_resampled
             
-            X_train = X_train_balanced.reshape(-1, 216, 1)
-            y_train = y_train_balanced
+            print(f"\n✅ After controlled balancing: {len(X_train)} training samples")
             
-            print(f"✅ After hybrid balancing: {len(X_train)} training samples")
-            
-            # Print new class distribution
+            # Print new class distribution with percentages
             counter = Counter(y_train)
-            print("New class distribution:")
+            print("\nNew class distribution:")
             for class_idx in sorted(counter.keys()):
                 count = counter[class_idx]
                 pct = (count / len(y_train)) * 100
-                print(f"  {self.class_names[class_idx]}: {count} ({pct:.1f}%)")
+                print(f"  {self.class_names[class_idx]}: {count:6d} ({pct:5.1f}%)")
         
         except Exception as e:
-            print(f"⚠️ Hybrid balancing failed: {str(e)}")
+            print(f"\n⚠️ Controlled balancing failed: {str(e)}")
             print("   Falling back to SMOTE only...")
             return self._apply_smote(X_train, y_train)
         
@@ -275,9 +298,14 @@ class ECGModelTrainer:
         if use_class_weights:
             class_weights = calculate_class_weights(y_train, num_classes=5)
         
-        # Get callbacks
+        # Get callbacks (including F1-score monitoring)
         model_save_path = os.path.join(self.model_dir, 'best_model.h5')
-        callbacks = get_callbacks(model_save_path=model_save_path, patience=10)
+        callbacks = get_callbacks(
+            model_save_path=model_save_path,
+            patience=10,
+            validation_data=(X_val, y_val),
+            class_names=self.class_full_names
+        )
         
         # Train model
         print(f"\nTraining for {epochs} epochs with batch size {batch_size}...")
@@ -319,7 +347,9 @@ class ECGModelTrainer:
         y_pred = np.argmax(y_pred_proba, axis=1)
         
         # Calculate metrics
-        test_loss, test_acc, _ = self.model.evaluate(X_test, y_test, verbose=0)
+        eval_results = self.model.evaluate(X_test, y_test, verbose=0)
+        test_loss = eval_results[0]
+        test_acc = eval_results[1]
         
         print(f"\nTest Accuracy: {test_acc*100:.2f}%")
         print(f"Test Loss: {test_loss:.4f}")
@@ -431,12 +461,12 @@ def main():
     
     # Configuration
     config = {
-        'model_type': 'standard',  # or 'enhanced'
+        'model_type': 'cnn_lstm',  # 'standard', 'enhanced', 'cnn_lstm' (recommended), 'rescnn_lstm'
         'epochs': 50,
-        'batch_size': 128,
-        'learning_rate': 0.001,
+        'batch_size': 256,  # Increased for CNN (better batch statistics)
+        'learning_rate': 0.001,  # Optimal for CNN-LSTM with Focal Loss
         'balance_strategy': 'hybrid',  # 'none', 'smote', 'hybrid', 'weights'
-        'use_class_weights': True
+        'use_class_weights': True  # Use with Focal Loss for maximum effect
     }
     
     print("\nConfiguration:")

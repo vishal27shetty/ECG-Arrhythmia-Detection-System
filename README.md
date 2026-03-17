@@ -1,5 +1,7 @@
 # ECG Arrhythmia Detection System
 
+[![GitHub](https://img.shields.io/badge/GitHub-Repository-blue)](https://github.com/vishal27shetty/ECG-Arrhythmia-Detection-System)
+
 Real-time ECG monitoring system with AI-powered arrhythmia classification using Bidirectional LSTM neural networks.
 
 ## 🎯 Project Overview
@@ -7,9 +9,35 @@ Real-time ECG monitoring system with AI-powered arrhythmia classification using 
 This system provides:
 - **Real-time ECG acquisition** from AD8232 sensor via Arduino Uno
 - **Edge processing** with digital signal filtering
-- **AI classification** of 5 arrhythmia types using Bi-LSTM model
-- **Live visualization** dashboard with alerts
-- **High accuracy** trained on MIT-BIH Arrhythmia Database
+- **AI classification** of 5 arrhythmia types using CNN-LSTM model
+- **Batch processing** dashboard with live waveform display
+- **High accuracy** trained on MIT-BIH Arrhythmia Database (70.7% test accuracy)
+
+## 📊 Dashboard Approach: Live Display + Batch Processing
+
+### Why Batch Processing?
+Instead of real-time classification during recording, we use a **Live Display + Batch Processing** approach:
+
+**During Recording (Live Display):**
+- Shows live ECG waveform only
+- No classification overhead
+- Fixed duration sessions (30-300 seconds)
+- Auto-stop when duration reached
+
+**After Recording (Batch Processing):**
+- Process entire signal at once
+- More accurate R-peak detection (full signal context)
+- No duplicate detections
+- Beat-by-beat classification
+- Comprehensive analysis & statistics
+- Saved to JSON logs
+
+**Benefits:**
+- ✅ **More Accurate**: Full signal context for peak detection
+- ✅ **No Duplicates**: Single-pass processing
+- ✅ **Consistent Results**: Same input = same output
+- ✅ **Faster UI**: No real-time inference overhead
+- ✅ **Better Debugging**: Complete signal analysis
 
 ## 📁 Project Structure
 
@@ -229,6 +257,46 @@ The dashboard will open in your browser at `http://localhost:8501`
 4. **Monitor**: View live ECG and classifications
 
 5. **Stop System**: Click ⏹️ Stop button when done
+   - **Automatic Session Analysis** is generated
+   - Detailed logs saved to `logs/` folder
+   - View comprehensive session statistics on-screen
+
+### Session Analysis & Logging
+
+When you stop the monitoring system, the following happens automatically:
+
+**Comprehensive Session Analysis:**
+- Duration and total beats analyzed
+- Beat classification distribution with percentages
+- Heart rate statistics (mean, min, max, variability)
+- Confidence analysis per class
+- Alert summary and history
+- Overall quality assessment with specific issues detected
+- Actionable recommendations for improvement
+
+**Automatic Log Generation:**
+
+The system saves two log files in the `logs/` directory:
+
+1. **JSON Log** (`ecg_session_YYYYMMDD_HHMMSS.json`):
+   - Complete structured data
+   - Beat-by-beat classifications with timestamps
+   - Full probability distributions
+   - Smoothing information
+   - All session statistics
+
+2. **Human-Readable Summary** (`ecg_session_YYYYMMDD_HHMMSS_summary.txt`):
+   - Easy-to-read text format
+   - Session overview
+   - Classification breakdown
+   - Quality assessment
+   - Recommendations
+
+**Quality Indicators:**
+- **Excellent**: High confidence, stable heart rate, good signal quality
+- **Good**: Acceptable performance with minor issues
+- **Fair**: Low confidence or signal quality issues detected
+- **Poor**: Multiple issues requiring attention
 
 ### Understanding Alert Thresholds
 
@@ -409,7 +477,37 @@ ECG Arrhythmia Detection System
 - [ ] Electrodes attached correctly
 - [ ] System monitoring live ECG
 
-**Need Help?** Check the Troubleshooting section above.
+## 🔧 Troubleshooting
+
+### Problem: Very Few Beats Detected (1-3 beats in 30+ seconds)
+
+**Symptoms:**
+- Dashboard shows only 1-3 beats after processing
+- "Very few peaks detected" warning in console
+- Heart rate < 30 BPM
+
+**Causes & Solutions:**
+
+| Cause | Solution |
+|-------|----------|
+| **Poor electrode contact** | • Clean skin with alcohol<br>• Press electrodes firmly<br>• Use electrode gel |
+| **Wrong electrode placement** | • RA: Right wrist/below right clavicle<br>• LA: Left wrist/below left clavicle<br>• LL: Left ankle/lower left abdomen |
+| **Weak signal** | • Check 3.3V power to AD8232<br>• Verify LOD pins show connection<br>• Try different electrode positions |
+| **Low data rate (<80%)** | • Check Arduino USB connection<br>• Verify 115200 baud rate<br>• Restart serial connection |
+| **Noisy signal** | • Keep cables still<br>• Move away from power sources<br>• Check ground connection |
+
+**Check During Recording:**
+- ✅ **Data Rate**: Should be 95-100%
+- ✅ **Signal Quality**: Should show "Good"
+- ✅ **Samples**: Should increase steadily
+- ✅ **Waveform**: Should show clear, repeating peaks
+
+**Recommendations:**
+- Use 30-60 second recordings (not less than 15s)
+- Test with finger on electrodes first (should see muscle noise)
+- View Arduino Serial Monitor to verify data is being sent
+
+---
 
 **Good luck with your project! ❤️**
 #   E C G - A r r h y t h m i a - D e t e c t i o n - S y s t e m 

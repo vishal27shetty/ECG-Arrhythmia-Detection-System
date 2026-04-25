@@ -46,24 +46,32 @@ class ECGSerialReader:
         
     def auto_detect_port(self) -> Optional[str]:
         """
-        Automatically detect Arduino serial port
+        Automatically detect Arduino serial port.
+        Works on Windows (COMx), Linux / Raspberry Pi (/dev/ttyUSBx, /dev/ttyACMx).
         
         Returns:
             Port name if found, None otherwise
         """
         ports = serial.tools.list_ports.comports()
         
-        # Look for common Arduino identifiers
-        arduino_keywords = ['arduino', 'ch340', 'usb', 'acm']
+        arduino_keywords = ['arduino', 'ch340', 'ch341', 'cp210', 'ftdi', 'usb', 'acm']
         
         for port in ports:
-            port_info = (port.device + port.description + port.manufacturer).lower()
+            manufacturer = port.manufacturer or ''
+            port_info = (port.device + port.description + manufacturer).lower()
             for keyword in arduino_keywords:
                 if keyword in port_info:
                     print(f"Auto-detected Arduino on port: {port.device}")
                     return port.device
         
-        # If no Arduino found, return first available port
+        # On Linux/Pi, prefer /dev/ttyUSB* or /dev/ttyACM* over other ports
+        import platform
+        if platform.system() == 'Linux':
+            for port in ports:
+                if '/dev/ttyUSB' in port.device or '/dev/ttyACM' in port.device:
+                    print(f"Using Linux serial port: {port.device}")
+                    return port.device
+        
         if ports:
             print(f"Using first available port: {ports[0].device}")
             return ports[0].device

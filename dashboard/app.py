@@ -1,6 +1,11 @@
 """
 Streamlit Dashboard for Real-Time ECG Monitoring and Arrhythmia Detection
 Live visualization of ECG waveform, classification results, and alerts
+
+Runs on both desktop and Raspberry Pi.  Set the environment variable
+    ECGPI=1
+to activate Pi-optimised defaults (smaller buffers, .tflite model, 50 Hz
+powerline filter, /dev/ttyUSB0 serial port).
 """
 
 import streamlit as st
@@ -13,12 +18,37 @@ from collections import deque
 from datetime import datetime
 import sys
 import os
+import platform
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from realtime.serial_reader import ECGSerialReader
 from realtime.batch_processor import BatchECGProcessor
+
+# ---------- Pi detection ----------
+IS_PI = (
+    os.environ.get('ECGPI', '0') == '1'
+    or (platform.system() == 'Linux' and platform.machine().startswith('aarch64'))
+    or (platform.system() == 'Linux' and platform.machine().startswith('arm'))
+)
+
+# Tunable defaults that differ between desktop and Pi
+PI_DEFAULTS = {
+    'buffer_maxlen': 7200,      # ~20 s at 360 Hz (saves RAM)
+    'model_path': './models/best_model.tflite',
+    'serial_port': '/dev/ttyUSB0',
+    'refresh_default': 250,     # slower refresh to ease CPU
+    'session_default': 30,
+}
+DESKTOP_DEFAULTS = {
+    'buffer_maxlen': 36000,     # ~100 s at 360 Hz
+    'model_path': './models/best_model.h5',
+    'serial_port': '',
+    'refresh_default': 100,
+    'session_default': 30,
+}
+CFG = PI_DEFAULTS if IS_PI else DESKTOP_DEFAULTS
 
 
 # Page configuration
@@ -76,9 +106,9 @@ if 'serial_reader' not in st.session_state:
 if 'batch_processor' not in st.session_state:
     st.session_state.batch_processor = None
 if 'ecg_buffer' not in st.session_state:
-    st.session_state.ecg_buffer = deque(maxlen=36000)  # 100 seconds at 360 Hz
+    st.session_state.ecg_buffer = deque(maxlen=CFG['buffer_maxlen'])
 if 'time_buffer' not in st.session_state:
-    st.session_state.time_buffer = deque(maxlen=36000)
+    st.session_state.time_buffer = deque(maxlen=CFG['buffer_maxlen'])
 if 'complete_ecg_signal' not in st.session_state:
     st.session_state.complete_ecg_signal = []
 if 'is_running' not in st.session_state:
@@ -340,10 +370,14 @@ def main():
     with st.sidebar:
         st.header("System Control")
         
+        if IS_PI:
+            st.caption("Running in **Raspberry Pi** mode")
+        
         # Configuration
-        serial_port = st.text_input("Serial Port", value="", help="Leave empty for auto-detect")
-        model_path = st.text_input("Model Path", value="./models/best_model.h5")
-        session_duration = st.slider("Session Duration (seconds)", 15, 300, 30, step=5,
+        serial_port = st.text_input("Serial Port", value=CFG['serial_port'],
+                                    help="Leave empty for auto-detect. Pi: /dev/ttyUSB0 or /dev/ttyACM0")
+        model_path = st.text_input("Model Path", value=CFG['model_path'])
+        session_duration = st.slider("Session Duration (seconds)", 15, 300, CFG['session_default'], step=5,
                                      disabled=st.session_state.is_running,
                                      help="Recording will auto-stop after this duration. Minimum 15s recommended for reliable analysis.")
         
@@ -391,8 +425,8 @@ def main():
         st.markdown("---")
         
         # Auto-refresh control
-        refresh_rate = st.slider("Refresh Rate (ms)", 50, 500, 100, step=50,
-                                 help="Faster refresh = better data collection (100ms recommended)")
+        refresh_rate = st.slider("Refresh Rate (ms)", 50, 500, CFG['refresh_default'], step=50,
+                                 help="Faster refresh = better data collection. Pi: 200-300ms recommended.")
     
     # Main content area
     if st.session_state.is_running:
@@ -525,7 +559,17 @@ def main():
             # Welcome screen
             st.info("👈 Configure settings and click 'Start' to begin recording")
             
-            st.markdown("""
+            platform_note = ""
+            if IS_PI:
+                platform_note = """
+            ### 🍓 Raspberry Pi Mode Active
+            - Using **TFLite** runtime for lightweight inference
+            - Reduced buffer sizes to save RAM
+            - Default serial port: `/dev/ttyUSB0`
+            - Tip: use `ECGPI=1 streamlit run dashboard/app.py` to force Pi mode
+            """
+            
+            st.markdown(f"""
             ### 📋 How It Works:
             
             **During Recording:**
@@ -539,7 +583,7 @@ def main():
             - Complete beat-by-beat classification
             - Comprehensive analysis report
             - Results saved to JSON log files
-            
+            {platform_note}
             ### Instructions:
             1. **Connect Hardware**: Arduino with AD8232 via USB
             2. **Set Duration**: Choose recording length (60s recommended)

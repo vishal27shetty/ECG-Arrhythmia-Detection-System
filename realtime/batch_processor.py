@@ -2,13 +2,18 @@
 Batch ECG Processing Module
 Processes entire ECG recording after acquisition completes
 More accurate than real-time processing
+
+Supports both TensorFlow (desktop) and TFLite (Raspberry Pi) backends.
+The backend is selected automatically based on the model file extension:
+  - .h5 / .keras  -> TensorFlow/Keras
+  - .tflite       -> TFLite Runtime (lightweight, Pi-friendly)
 """
 
 import numpy as np
-from tensorflow import keras
 from collections import Counter
 from typing import Dict, List, Tuple
 import time
+import os
 
 from preprocessing.filters import ECGFilter
 from preprocessing.signal_processing import PanTompkinsDetector, BeatSegmenter
@@ -30,23 +35,18 @@ class BatchECGProcessor:
         Initialize batch processor
         
         Args:
-            model_path: Path to trained model
+            model_path: Path to trained model (.h5 or .tflite)
             sampling_rate: ECG sampling rate in Hz
         """
         self.sampling_rate = sampling_rate
+        self._use_tflite = model_path.endswith('.tflite')
         
-        # Load model
         print(f"Loading model from {model_path}...")
-        try:
-            from models.model_architecture import FocalLoss
-            self.model = keras.models.load_model(
-                model_path,
-                custom_objects={'FocalLoss': FocalLoss}
-            )
-            print("Model loaded successfully!")
-        except Exception as e:
-            print(f"Loading with custom objects failed, trying without: {e}")
-            self.model = keras.models.load_model(model_path)
+        
+        if self._use_tflite:
+            self._load_tflite_model(model_path)
+        else:
+            self._load_keras_model(model_path)
         
         # Initialize processing components
         self.ecg_filter = ECGFilter(sampling_rate=sampling_rate)
@@ -56,6 +56,34 @@ class BatchECGProcessor:
         # Class names
         self.class_names = ['N', 'S', 'V', 'F', 'Q']
         self.class_full_names = ['Normal', 'Supraventricular', 'Ventricular', 'Fusion', 'Unknown']
+    
+    def _load_tflite_model(self, model_path: str):
+        """Load a TFLite model for lightweight inference on Raspberry Pi"""
+        try:
+            import tflite_runtime.interpreter as tflite
+        except ImportError:
+            from tensorflow import lite as tflite
+            tflite.Interpreter = tflite.Interpreter  # compatibility shim
+        
+        self.interpreter = tflite.Interpreter(model_path=model_path)
+        self.interpreter.allocate_tensors()
+        self._input_details = self.interpreter.get_input_details()
+        self._output_details = self.interpreter.get_output_details()
+        print("TFLite model loaded successfully (Pi mode)")
+    
+    def _load_keras_model(self, model_path: str):
+        """Load a full Keras model (desktop mode)"""
+        from tensorflow import keras
+        try:
+            from models.model_architecture import FocalLoss
+            self.model = keras.models.load_model(
+                model_path,
+                custom_objects={'FocalLoss': FocalLoss}
+            )
+            print("Keras model loaded successfully!")
+        except Exception as e:
+            print(f"Loading with custom objects failed, trying without: {e}")
+            self.model = keras.models.load_model(model_path)
     
     def _validate_signal_quality(self, ecg_signal: np.ndarray) -> Dict:
         """Check signal quality before processing"""
@@ -89,6 +117,18 @@ class BatchECGProcessor:
             quality['warnings'].append("High noise level detected - check electrode placement")
         
         return quality
+    
+    def _predict(self, X: np.ndarray) -> np.ndarray:
+        """Run inference using whichever backend was loaded."""
+        if self._use_tflite:
+            predictions = np.zeros((len(X), 5), dtype=np.float32)
+            for i in range(len(X)):
+                input_data = X[i:i+1].astype(np.float32)
+                self.interpreter.set_tensor(self._input_details[0]['index'], input_data)
+                self.interpreter.invoke()
+                predictions[i] = self.interpreter.get_tensor(self._output_details[0]['index'])[0]
+            return predictions
+        return self.model.predict(X, verbose=0)
     
     def process_recording(self, ecg_signal: np.ndarray) -> Dict:
         """
@@ -182,7 +222,7 @@ class BatchECGProcessor:
         
         # Step 5: Classify all beats
         print("\n[5/5] Classifying beats...")
-        predictions = self.model.predict(X, verbose=0)
+        predictions = self._predict(X)
         print("✓ Classification complete")
         
         # Process results

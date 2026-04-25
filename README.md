@@ -44,25 +44,30 @@ Instead of real-time classification during recording, we use a **Live Display + 
 ```
 FInal Year Project/
 ├── arduino/
-│   └── ecg_acquisition.ino         # Arduino code for ECG acquisition
+│   └── ecg_acquisition.ino          # Arduino code for ECG acquisition
 ├── data/
-│   ├── mit_bih/                    # MIT-BIH dataset (downloaded)
-│   └── recordings/                 # Local test recordings
+│   ├── mit_bih/                     # MIT-BIH dataset (downloaded)
+│   └── recordings/                  # Local test recordings
 ├── models/
-│   ├── dataset_preparation.py      # MIT-BIH data preprocessing
-│   ├── model_architecture.py       # Bi-LSTM model definition
-│   ├── train_bilstm.py             # Training script
-│   └── trained_model.h5            # Trained model (after training)
+│   ├── dataset_preparation.py       # MIT-BIH data preprocessing
+│   ├── model_architecture.py        # Bi-LSTM model definition
+│   ├── train_bilstm.py              # Training script
+│   ├── best_model.h5                # Trained Keras model (desktop)
+│   └── best_model.tflite            # TFLite model  (Raspberry Pi)
 ├── preprocessing/
-│   ├── filters.py                  # DSP filters
-│   └── signal_processing.py        # R-peak detection, beat segmentation
+│   ├── filters.py                   # DSP filters
+│   └── signal_processing.py         # R-peak detection, beat segmentation
 ├── realtime/
-│   ├── serial_reader.py            # Arduino serial communication
-│   └── inference_engine.py         # Real-time classification
+│   ├── serial_reader.py             # Arduino serial communication
+│   ├── batch_processor.py           # Batch inference (Keras + TFLite)
+│   └── inference_engine.py          # Real-time classification
 ├── dashboard/
-│   └── app.py                      # Streamlit dashboard
-├── requirements.txt                # Python dependencies
-└── README.md                       # This file
+│   └── app.py                       # Streamlit dashboard (desktop + Pi)
+├── convert_model_to_tflite.py       # Keras → TFLite converter
+├── start_pi.sh                      # One-command Pi launcher
+├── requirements.txt                 # Desktop dependencies
+├── requirements_pi.txt              # Raspberry Pi dependencies (lightweight)
+└── README.md                        # This file
 ```
 
 ## 🔧 Hardware Setup
@@ -101,7 +106,7 @@ LO-         →  Digital Pin 11
 4. Select correct **Port**
 5. Click **Upload** button
 
-### 2. Python Environment Setup
+### 2. Python Environment Setup (Desktop)
 
 ```bash
 # Create virtual environment
@@ -129,6 +134,71 @@ This will:
 - Extract and label beats
 - Create train/test split
 - Save processed data
+
+## 🍓 Raspberry Pi Deployment
+
+The system can run on a **Raspberry Pi 4 (2 GB+ RAM)** or newer for portable,
+bedside ECG monitoring. The Pi uses **TensorFlow Lite** instead of full
+TensorFlow, so inference is fast and memory-friendly.
+
+### Pi Setup — Step by Step
+
+#### 1. Convert the model (on your desktop)
+
+```bash
+# On your laptop/desktop where TensorFlow is installed
+python convert_model_to_tflite.py
+# Creates models/best_model.tflite
+```
+
+#### 2. Copy the project to the Pi
+
+```bash
+scp -r "FInal Year Project" pi@<PI_IP>:~/ecg-project
+```
+
+#### 3. Install dependencies on the Pi
+
+```bash
+ssh pi@<PI_IP>
+cd ~/ecg-project
+
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements_pi.txt
+```
+
+#### 4. Connect hardware and run
+
+```bash
+# Plug Arduino into Pi USB port, then:
+chmod +x start_pi.sh
+./start_pi.sh              # auto-detect serial port
+# or
+./start_pi.sh /dev/ttyACM0 # specify port explicitly
+```
+
+Open `http://<PI_IP>:8501` on any device on the same network.
+
+### Pi Hardware Wiring
+
+```
+Raspberry Pi USB  ──►  Arduino Uno USB
+Arduino A0        ◄──  AD8232 OUTPUT
+Arduino D10       ◄──  AD8232 LO+
+Arduino D11       ◄──  AD8232 LO-
+Arduino GND       ──►  AD8232 GND
+Arduino 3.3V      ──►  AD8232 3.3V
+```
+
+### Pi Tips
+
+- Use a **Raspberry Pi 4 (4 GB)** or **Pi 5** for best performance
+- A heat-sink or fan is recommended during long sessions
+- The dashboard auto-detects Pi mode via CPU architecture; you can also
+  force it with `export ECGPI=1`
+- Use `requirements_pi.txt` — it skips TensorFlow and heavy training libs
+- Serial permission issues? Run `sudo usermod -aG dialout $USER` and reboot
 
 ## 🚀 Training the Model
 

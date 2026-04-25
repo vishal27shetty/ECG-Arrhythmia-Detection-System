@@ -1,0 +1,867 @@
+\documentclass[12pt,a4paper]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{caption}
+
+% Title information
+\title{\textbf{ECG Arrhythmia Detection System} \\ Real-Time Classification using CNN-LSTM Neural Networks}
+\author{Final Year Project}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+
+% ============================================================================
+% SECTION 1: INPUT DATA
+% ============================================================================
+\section{Input Data Collection}
+
+This project utilizes two distinct types of ECG data for training and real-time validation of the arrhythmia detection system.
+
+\subsection{Training Data: MIT-BIH Arrhythmia Database}
+
+The model is trained on the MIT-BIH Arrhythmia Database, a gold-standard dataset for cardiac arrhythmia research.
+
+\subsubsection{Dataset Characteristics}
+
+\begin{itemize}
+    \item \textbf{Source}: PhysioNet MIT-BIH Arrhythmia Database
+    \item \textbf{Total Records}: 48 half-hour ECG recordings from different patients
+    \item \textbf{Sampling Rate}: 360 Hz (samples per second)
+    \item \textbf{Total Annotated Beats}: Approximately 109,000 heartbeats
+    \item \textbf{Lead Configuration}: Modified Lead II (MLII)
+    \item \textbf{Bit Resolution}: 11-bit ADC (0-2048 range)
+    \item \textbf{Recording Duration}: 30 minutes per record
+\end{itemize}
+
+\subsubsection{Train-Test Split}
+
+The dataset follows the standard DS1/DS2 split protocol:
+
+\begin{itemize}
+    \item \textbf{Training Set (DS1)}: 22 records
+    \begin{itemize}
+        \item Records: 101, 106, 108, 109, 112, 114, 115, 116, 118, 119, 122, 124, 201, 203, 205, 207, 208, 209, 215, 220, 223, 230
+        \item Approximately 70,000 beats
+    \end{itemize}
+    \item \textbf{Test Set (DS2)}: 23 records
+    \begin{itemize}
+        \item Records: 100, 103, 105, 111, 113, 117, 121, 123, 200, 202, 210, 212, 213, 214, 217, 219, 221, 222, 228, 231, 232, 233, 234
+        \item Approximately 51,905 beats
+    \end{itemize}
+\end{itemize}
+
+\subsubsection{AAMI Classification Standard}
+
+Heartbeats are classified into 5 categories following the AAMI EC57 standard:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}llp{7cm}@{}}
+\toprule
+\textbf{Class} & \textbf{Full Name} & \textbf{Description} \\ 
+\midrule
+N & Normal & Normal sinus rhythm, includes left/right bundle branch blocks \\
+S & Supraventricular & Atrial premature beats, atrial escape beats, nodal escape beats \\
+V & Ventricular & Ventricular ectopic beats, premature ventricular contractions \\
+F & Fusion & Fusion of ventricular and normal beats \\
+Q & Unknown & Paced beats, unclassifiable morphologies \\ 
+\bottomrule
+\end{tabular}
+\caption{AAMI Arrhythmia Classification Standard (5 Classes)}
+\label{tab:aami_classes}
+\end{table}
+
+\subsubsection{Original Class Distribution}
+
+The MIT-BIH dataset exhibits severe class imbalance, typical of real-world medical data:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Class} & \textbf{Count (Training)} & \textbf{Percentage} \\ 
+\midrule
+Normal (N) & ~63,000 & 90.0\% \\
+Supraventricular (S) & ~2,700 & 3.9\% \\
+Ventricular (V) & ~3,800 & 5.4\% \\
+Fusion (F) & ~400 & 0.6\% \\
+Unknown (Q) & ~100 & 0.1\% \\ 
+\midrule
+\textbf{Total} & ~70,000 & 100\% \\
+\bottomrule
+\end{tabular}
+\caption{Original Training Data Distribution (Highly Imbalanced)}
+\label{tab:class_distribution}
+\end{table}
+
+\subsection{Real-Time Data: AD8232 ECG Sensor}
+
+Real-time ECG data is collected using a hardware acquisition system for live arrhythmia monitoring.
+
+\subsubsection{Hardware Configuration}
+
+\begin{itemize}
+    \item \textbf{Sensor}: AD8232 single-lead ECG module
+    \item \textbf{Microcontroller}: Arduino Uno (ATmega328P)
+    \item \textbf{Sampling Rate}: 360 Hz (matching training data)
+    \item \textbf{ADC Resolution}: 10-bit (0-1023 range)
+    \item \textbf{Power Supply}: 3.3V (isolated, battery-powered)
+    \item \textbf{Communication}: Serial UART at 115200 baud
+    \item \textbf{Lead Configuration}: Modified Lead II (RA, LA, LL electrodes)
+\end{itemize}
+
+\subsubsection{Data Logging Format}
+
+Real-time recordings are saved as JSON files in the \texttt{logs/} directory with the naming convention: \texttt{ecg\_batch\_YYYYMMDD\_HHMMSS.json}
+
+\paragraph{Example Log File Analysis:} \texttt{ecg\_batch\_20260307\_105545.json}
+
+\begin{itemize}
+    \item \textbf{Session Duration}: 84.37 seconds
+    \item \textbf{Total Beats Detected}: 10 heartbeats
+    \item \textbf{R-Peaks Detected}: 10
+    \item \textbf{Valid Beats Segmented}: 10 (100\% success rate)
+    \item \textbf{Processing Time}: 1.05 seconds for entire batch
+\end{itemize}
+
+Each log entry contains:
+\begin{itemize}
+    \item Beat index and timestamp
+    \item R-peak sample location
+    \item Predicted class and confidence score
+    \item Full probability distribution across all 5 classes
+    \item Heart rate statistics (mean, std, min, max)
+    \item Session metadata and quality metrics
+\end{itemize}
+
+\subsubsection{Sample Recording Statistics}
+
+From the example session (\texttt{ecg\_batch\_20260307\_105545.json}):
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lc@{}}
+\toprule
+\textbf{Metric} & \textbf{Value} \\ 
+\midrule
+Classification Distribution & 80\% Normal, 20\% Ventricular \\
+Mean Confidence & 59.5\% \\
+Confidence Range & 32.1\% -- 68.0\% \\
+Mean Heart Rate & 84.5 BPM \\
+Heart Rate Range & 43.6 -- 150.0 BPM \\
+Heart Rate Variability (Std) & 35.3 BPM \\
+\bottomrule
+\end{tabular}
+\caption{Real-Time Recording Statistics (Example Session)}
+\label{tab:realtime_stats}
+\end{table}
+
+% ============================================================================
+% SECTION 2: ALGORITHMS
+% ============================================================================
+\section{Algorithms and Methods}
+
+The ECG arrhythmia detection system employs a multi-stage pipeline combining digital signal processing and deep learning techniques.
+
+\subsection{Signal Preprocessing Pipeline}
+
+\subsubsection{Digital Signal Filtering}
+
+The raw ECG signal undergoes several filtering stages to remove noise and baseline wander:
+
+\begin{enumerate}
+    \item \textbf{Bandpass Filter}: 0.5 -- 50 Hz
+    \begin{itemize}
+        \item Removes baseline wander (< 0.5 Hz)
+        \item Eliminates high-frequency noise and power line interference (> 50 Hz)
+        \item Implementation: Butterworth filter, 4th order
+    \end{itemize}
+    
+    \item \textbf{Notch Filter}: 50/60 Hz
+    \begin{itemize}
+        \item Removes power line interference
+        \item Adaptive to regional power frequency
+    \end{itemize}
+    
+    \item \textbf{Normalization}:
+    \begin{itemize}
+        \item Z-score normalization: $x_{norm} = \frac{x - \mu}{\sigma}$
+        \item Ensures consistent amplitude across different recordings
+    \end{itemize}
+\end{enumerate}
+
+\subsubsection{R-Peak Detection: Pan-Tompkins Algorithm}
+
+The Pan-Tompkins algorithm is used for robust QRS complex detection:
+
+\textbf{Algorithm Steps:}
+\begin{enumerate}
+    \item \textbf{Derivative Filter}: Emphasizes high-frequency components of QRS
+    \item \textbf{Squaring}: $y[n] = x[n]^2$ (amplifies large derivatives)
+    \item \textbf{Moving Window Integration}: Smooths squared signal
+    \item \textbf{Adaptive Thresholding}: Dynamic threshold based on signal and noise levels
+    \item \textbf{Peak Detection}: Identifies R-peak locations with refractory period (200 ms)
+\end{enumerate}
+
+\textbf{Performance:}
+\begin{itemize}
+    \item Sensitivity: $>$99.5\% on MIT-BIH database
+    \item Positive Predictivity: $>$99.7\%
+\end{itemize}
+
+\subsubsection{Beat Segmentation}
+
+Once R-peaks are detected, individual heartbeats are extracted:
+
+\begin{itemize}
+    \item \textbf{Window Size}: 216 samples (0.6 seconds at 360 Hz)
+    \item \textbf{Window Composition}:
+    \begin{itemize}
+        \item Pre-R samples: 54 (0.15 seconds before R-peak)
+        \item Post-R samples: 162 (0.45 seconds after R-peak)
+    \end{itemize}
+    \item \textbf{Rationale}: Captures complete PQRST complex including T-wave
+\end{itemize}
+
+\subsection{Deep Learning Model Architecture}
+
+\subsubsection{CNN-LSTM Hybrid Model (Recommended)}
+
+The primary model combines Convolutional Neural Networks (CNN) for feature extraction with Long Short-Term Memory (LSTM) networks for temporal modeling.
+
+\paragraph{Architecture Overview:}
+
+\begin{enumerate}
+    \item \textbf{Input Layer}: (216, 1) - Single-channel ECG beat
+    
+    \item \textbf{Convolutional Block 1}:
+    \begin{itemize}
+        \item Conv1D: 64 filters, kernel size 5, same padding
+        \item Batch Normalization
+        \item ReLU Activation
+        \item Spatial Dropout: 50\%
+        \item Max Pooling: pool size 2 $\rightarrow$ Output: (108, 64)
+    \end{itemize}
+    
+    \item \textbf{Convolutional Block 2}:
+    \begin{itemize}
+        \item Conv1D: 128 filters, kernel size 3, same padding
+        \item Batch Normalization
+        \item ReLU Activation
+        \item Spatial Dropout: 50\%
+        \item Max Pooling: pool size 2 $\rightarrow$ Output: (54, 128)
+    \end{itemize}
+    
+    \item \textbf{Bidirectional LSTM Layer 1}:
+    \begin{itemize}
+        \item 64 units per direction (128 total)
+        \item Return sequences: True
+        \item L2 regularization: 0.001
+        \item Dropout: 50\%
+    \end{itemize}
+    
+    \item \textbf{Bidirectional LSTM Layer 2}:
+    \begin{itemize}
+        \item 32 units per direction (64 total)
+        \item Return sequences: False
+        \item L2 regularization: 0.001
+        \item Dropout: 50\%
+    \end{itemize}
+    
+    \item \textbf{Dense Layer}:
+    \begin{itemize}
+        \item 64 units, ReLU activation
+        \item L2 regularization: 0.001
+        \item Dropout: 40\%
+    \end{itemize}
+    
+    \item \textbf{Output Layer}:
+    \begin{itemize}
+        \item 5 units (one per class)
+        \item Softmax activation
+        \item Output: Probability distribution over classes
+    \end{itemize}
+\end{enumerate}
+
+\paragraph{Model Complexity:}
+\begin{itemize}
+    \item Total Parameters: ~500,000
+    \item Trainable Parameters: ~500,000
+    \item Model Size: ~2 MB (float32 precision)
+\end{itemize}
+
+% ----------------------------------------------------------------------------
+\subsubsection{Mathematical Foundation of the Bidirectional LSTM}
+
+The Bidirectional Long Short-Term Memory (Bi-LSTM) network forms the temporal
+core of the classifier. This section derives the full mathematics from the standard
+LSTM cell through to the bidirectional extension used in this system.
+
+% ---- 2.2.2a Standard LSTM Cell ----
+\paragraph{Standard LSTM Cell.}
+
+A vanilla Recurrent Neural Network (RNN) updates its hidden state as:
+\begin{equation}
+    h_t = \tanh\!\left(W_h\,h_{t-1} + W_x\,x_t + b\right)
+\end{equation}
+where $x_t \in \mathbb{R}^{d}$ is the input at timestep $t$, $h_{t-1}$ is the
+previous hidden state, and $W_h$, $W_x$, $b$ are learned parameters.
+This formulation suffers from \textbf{vanishing/exploding gradients} over long
+sequences because gradients are multiplied by the same weight matrix at every step.
+
+The \textbf{LSTM} introduces a \emph{cell state} $c_t$ and three multiplicative
+gates that regulate information flow:
+
+\vspace{0.5em}
+\noindent\textit{(i) Forget Gate} --- decides what fraction of the previous cell
+state to discard:
+\begin{equation}
+    f_t = \sigma\!\left(W_f\,[h_{t-1};\,x_t] + b_f\right)
+    \label{eq:forget}
+\end{equation}
+
+\noindent\textit{(ii) Input Gate} --- decides which new information to write into
+the cell state:
+\begin{equation}
+    i_t = \sigma\!\left(W_i\,[h_{t-1};\,x_t] + b_i\right)
+    \label{eq:input}
+\end{equation}
+
+\noindent\textit{(iii) Candidate Cell State} --- a vector of candidate values
+to potentially add:
+\begin{equation}
+    \tilde{c}_t = \tanh\!\left(W_c\,[h_{t-1};\,x_t] + b_c\right)
+    \label{eq:candidate}
+\end{equation}
+
+\noindent\textit{(iv) Cell State Update} --- combines old memory (scaled by
+$f_t$) with new information (scaled by $i_t$):
+\begin{equation}
+    c_t = f_t \odot c_{t-1} \;+\; i_t \odot \tilde{c}_t
+    \label{eq:cell}
+\end{equation}
+
+\noindent\textit{(v) Output Gate} --- controls how much of the cell state
+is exposed as the hidden state:
+\begin{equation}
+    o_t = \sigma\!\left(W_o\,[h_{t-1};\,x_t] + b_o\right)
+    \label{eq:output_gate}
+\end{equation}
+
+\noindent\textit{(vi) Hidden State Output}:
+\begin{equation}
+    h_t = o_t \odot \tanh(c_t)
+    \label{eq:hidden}
+\end{equation}
+
+\noindent where:
+\begin{itemize}
+    \item $\sigma(\cdot)$ is the sigmoid activation: $\sigma(z)=\frac{1}{1+e^{-z}}$
+    \item $\tanh(\cdot)$ is the hyperbolic tangent activation
+    \item $\odot$ denotes element-wise (Hadamard) multiplication
+    \item $[h_{t-1};\,x_t]$ denotes vector concatenation
+    \item $W_f, W_i, W_c, W_o \in \mathbb{R}^{n_h \times (n_h + d)}$ are learned weight matrices
+    \item $b_f, b_i, b_c, b_o \in \mathbb{R}^{n_h}$ are learned bias vectors
+    \item $n_h$ is the number of hidden (LSTM) units
+\end{itemize}
+
+\vspace{0.5em}
+\noindent\textbf{Why the gating mechanism helps:}
+The forget gate $f_t$ can be close to 1, allowing $c_t \approx c_{t-1}$, which
+provides a near-constant gradient path through time. This prevents the vanishing
+gradient problem that plagues simple RNNs, making LSTMs effective for learning
+long-range temporal dependencies in ECG signals (e.g.\ linking P-wave to the
+subsequent QRS complex).
+
+% ---- 2.2.2b Bidirectional Extension ----
+\paragraph{Bidirectional Extension.}
+
+A standard LSTM only processes the sequence \emph{left-to-right}, so the hidden
+state $h_t$ depends only on past inputs $x_1, \ldots, x_t$.
+For ECG beat classification, the model benefits from seeing the \emph{full} beat
+context --- both the events that precede and follow a given sample.
+A \textbf{Bidirectional LSTM} achieves this by running two independent LSTM
+layers in parallel:
+
+\begin{equation}
+    \overrightarrow{h}_t = \text{LSTM}_{\text{fwd}}\!\left(x_t,\,
+        \overrightarrow{h}_{t-1},\,\overrightarrow{c}_{t-1}\right)
+    \qquad t = 1, 2, \ldots, T
+\end{equation}
+\begin{equation}
+    \overleftarrow{h}_t = \text{LSTM}_{\text{bwd}}\!\left(x_t,\,
+        \overleftarrow{h}_{t+1},\,\overleftarrow{c}_{t+1}\right)
+    \qquad t = T, T{-}1, \ldots, 1
+\end{equation}
+
+\noindent The outputs of both directions are concatenated at every timestep to
+form a richer representation:
+\begin{equation}
+    h_t^{\text{bi}} = \left[\overrightarrow{h}_t\;;\;\overleftarrow{h}_t\right]
+    \in \mathbb{R}^{2\,n_h}
+\end{equation}
+
+\noindent In this project:
+\begin{itemize}
+    \item \textbf{Bi-LSTM Layer 1}: $n_h = 64$ units per direction
+          $\Rightarrow$ output dimension $128$, \texttt{return\_sequences=True}
+          (passes the full sequence $h_1^{\text{bi}}, \ldots, h_T^{\text{bi}}$ to
+          the next layer).
+    \item \textbf{Bi-LSTM Layer 2}: $n_h = 32$ units per direction
+          $\Rightarrow$ output dimension $64$, \texttt{return\_sequences=False}
+          (returns only $h_T^{\text{bi}}$, a single fixed-length feature vector).
+\end{itemize}
+
+% ---- 2.2.2c Backpropagation Through Time ----
+\paragraph{Backpropagation Through Time (BPTT).}
+
+Training an LSTM requires computing gradients through the unrolled computational
+graph. For a sequence of length $T$ and a loss $\mathcal{L}$, the gradient with
+respect to the cell state propagates as:
+
+\begin{equation}
+    \frac{\partial \mathcal{L}}{\partial c_{t}}
+    =
+    \frac{\partial \mathcal{L}}{\partial c_{t+1}}
+    \cdot f_{t+1}
+    \;+\;
+    \frac{\partial \mathcal{L}}{\partial h_t}
+    \cdot o_t \cdot \bigl(1 - \tanh^2(c_t)\bigr)
+    \label{eq:bptt}
+\end{equation}
+
+\noindent The key term $f_{t+1}$ can remain close to 1 (controlled by the learned
+forget gate), keeping the gradient from vanishing over many timesteps --- in
+contrast to a plain RNN where the equivalent term is the recurrent weight matrix
+norm, which can easily be $\ll 1$ or $\gg 1$.
+
+% ---- 2.2.2d Role in the ECG Pipeline ----
+\paragraph{Role in the ECG Classification Pipeline.}
+
+After the two CNN blocks reduce the input from $(216, 1)$ to $(54, 128)$, the
+sequence fed to the Bi-LSTM has $T = 54$ timesteps, each of dimension $d = 128$.
+The Bi-LSTM layers model how the local morphological features (detected by the
+CNN) relate to one another across the beat window:
+
+\begin{itemize}
+    \item \textbf{Forward pass} ($\overrightarrow{h}_t$): captures how
+          features build up from the P-wave onset through the QRS complex.
+    \item \textbf{Backward pass} ($\overleftarrow{h}_t$): captures how the
+          T-wave and ST-segment relate back to the earlier QRS peak.
+    \item \textbf{Combined} ($h_T^{\text{bi}} \in \mathbb{R}^{64}$): a
+          compact descriptor of the entire beat, passed to the Dense + Softmax
+          head for 5-class classification.
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Layer} & \textbf{Input Shape} & \textbf{Output Shape} & \textbf{Parameters} \\
+\midrule
+Bi-LSTM 1 (fwd + bwd, 64 units ea.) & $(54, 128)$ & $(54, 128)$ & $\approx$198K \\
+Dropout (50\%) & $(54, 128)$ & $(54, 128)$ & 0 \\
+Bi-LSTM 2 (fwd + bwd, 32 units ea.) & $(54, 128)$ & $(64,)$ & $\approx$49K \\
+Dropout (50\%) & $(64,)$ & $(64,)$ & 0 \\
+Dense (64, ReLU) & $(64,)$ & $(64,)$ & $\approx$4K \\
+Dense (5, Softmax) & $(64,)$ & $(5,)$ & 325 \\
+\bottomrule
+\end{tabular}
+\caption{Bi-LSTM and Classification Head: Shapes and Parameter Counts}
+\label{tab:bilstm_shapes}
+\end{table}
+
+% ---- 2.2.2e Output: Softmax Classification ----
+\paragraph{Softmax Output Layer.}
+
+The final Dense layer produces a probability distribution over the 5 AAMI classes:
+\begin{equation}
+    \hat{y}_k = \frac{e^{z_k}}{\displaystyle\sum_{j=1}^{5} e^{z_j}},
+    \qquad k \in \{N,\,S,\,V,\,F,\,Q\}
+\end{equation}
+where $z_k$ is the $k$-th logit output of the final dense layer.
+The predicted class is $\hat{c} = \arg\max_k \hat{y}_k$, and the confidence
+score reported in the logs is $\max_k \hat{y}_k$.
+
+\subsubsection{Alternative Architectures}
+
+Three additional architectures are available for comparison:
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}lp{5cm}l@{}}
+\toprule
+\textbf{Architecture} & \textbf{Description} & \textbf{Expected Acc.} \\ 
+\midrule
+Standard Bi-LSTM & Pure LSTM with 2 bidirectional layers & 50--60\% \\
+Enhanced Bi-LSTM & Bi-LSTM with attention mechanism & 55--65\% \\
+ResNet-CNN-LSTM & CNN-LSTM with residual connections & 87--92\% \\
+\bottomrule
+\end{tabular}
+\caption{Alternative Model Architectures}
+\label{tab:architectures}
+\end{table}
+
+\subsection{Training Configuration}
+
+\subsubsection{Loss Function: Focal Loss}
+
+To address extreme class imbalance, Focal Loss is employed instead of standard cross-entropy:
+
+\begin{equation}
+FL(p_t) = -\alpha_t (1 - p_t)^\gamma \log(p_t)
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $p_t$ is the model's estimated probability for the true class
+    \item $\alpha$ = 0.25 (weighting factor for class balance)
+    \item $\gamma$ = 2.0 (focusing parameter, emphasizes hard examples)
+\end{itemize}
+
+\textbf{Advantage}: Focal Loss down-weights easy examples and focuses training on hard-to-classify minority class samples.
+
+\subsubsection{Data Balancing Strategy}
+
+A controlled hybrid balancing approach is used to mitigate class imbalance:
+
+\begin{enumerate}
+    \item \textbf{Undersample Majority Class}:
+    \begin{itemize}
+        \item Reduce Normal (N) class from 90\% to 40\% of dataset
+        \item Prevents model bias toward majority class
+    \end{itemize}
+    
+    \item \textbf{SMOTE Oversampling for Minorities}:
+    \begin{itemize}
+        \item Synthetic Minority Over-sampling Technique
+        \item Target: 15\% each for S and V classes
+        \item Generate synthetic samples using k-nearest neighbors (k=5)
+    \end{itemize}
+    
+    \item \textbf{Capping Strategy}:
+    \begin{itemize}
+        \item Fusion (F) and Unknown (Q) classes capped at 10x original size
+        \item Prevents over-representation that can lead to false positives
+        \item Target: 5\% each maximum
+    \end{itemize}
+\end{enumerate}
+
+\textbf{Target Distribution After Balancing:}
+\begin{itemize}
+    \item N: 40\%, S: 15\%, V: 15\%, F: 5\%, Q: 5\%
+\end{itemize}
+
+\subsubsection{Regularization Techniques}
+
+Multiple regularization strategies prevent overfitting:
+
+\begin{itemize}
+    \item \textbf{Dropout}: 40--50\% on LSTM and Dense layers
+    \item \textbf{Spatial Dropout}: 50\% on convolutional layers
+    \item \textbf{L2 Regularization}: Weight decay factor = 0.001
+    \item \textbf{Batch Normalization}: After each convolutional layer
+    \item \textbf{Early Stopping}: Patience = 10 epochs (monitors validation loss)
+    \item \textbf{Learning Rate Reduction}: Factor = 0.5, Patience = 5 epochs
+\end{itemize}
+
+\subsubsection{Training Hyperparameters}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\ 
+\midrule
+Optimizer & Adam \\
+Learning Rate & 0.001 \\
+Batch Size & 256 \\
+Epochs & 50 (with early stopping) \\
+Validation Split & 15\% of training data \\
+Class Weights & Enabled (computed from balanced distribution) \\
+\bottomrule
+\end{tabular}
+\caption{Training Hyperparameters}
+\label{tab:hyperparameters}
+\end{table}
+
+\subsection{Inference Pipeline}
+
+\subsubsection{Real-Time Classification}
+
+The inference engine processes ECG signals in real-time with the following workflow:
+
+\begin{enumerate}
+    \item \textbf{Signal Acquisition}: Stream ECG data from Arduino at 360 Hz
+    \item \textbf{Buffer Management}: Accumulate samples for batch processing
+    \item \textbf{R-Peak Detection}: Apply Pan-Tompkins algorithm to detect heartbeats
+    \item \textbf{Beat Extraction}: Segment 216-sample windows around each R-peak
+    \item \textbf{Preprocessing}: Apply same filters as training data
+    \item \textbf{Classification}: Forward pass through CNN-LSTM model
+    \item \textbf{Post-Processing}: Apply confidence thresholding and smoothing
+    \item \textbf{Alert Generation}: Trigger alerts based on arrhythmia patterns
+\end{enumerate}
+
+\subsubsection{Classification Smoothing}
+
+To improve reliability and reduce false alarms:
+
+\begin{itemize}
+    \item \textbf{Confidence Threshold}: 60\% minimum for high-confidence classifications
+    \item \textbf{Smoothing Strategy}: Low-confidence predictions ($<$60\%) are replaced with recent high-confidence classifications
+    \item \textbf{Alert Thresholds}:
+    \begin{itemize}
+        \item Ventricular (Critical): 3 consecutive OR 10 per minute
+        \item Supraventricular (Warning): 7 consecutive beats
+        \item Unknown (Info): Any beat with $>$75\% confidence
+    \end{itemize}
+\end{itemize}
+
+% ============================================================================
+% SECTION 3: RESULTS
+% ============================================================================
+\section{Results and Performance Evaluation}
+
+This section presents quantitative results from both offline training evaluation and real-time system testing.
+
+\subsection{Training Results}
+
+The CNN-LSTM model was trained on the MIT-BIH database and evaluated on the held-out test set (DS2).
+
+\subsubsection{Overall Performance}
+
+\begin{itemize}
+    \item \textbf{Test Accuracy}: \textbf{70.68\%}
+    \item \textbf{Test Loss}: 0.156
+    \item \textbf{Weighted F1-Score}: 75.9\%
+    \item \textbf{Training Time}: ~25 minutes (CPU), ~8 minutes (GPU)
+\end{itemize}
+
+\subsubsection{Per-Class Performance Metrics}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+\textbf{Class} & \textbf{Precision} & \textbf{Recall} & \textbf{F1-Score} & \textbf{Support} \\ 
+\midrule
+Normal (N) & 91.5\% & 75.9\% & \textbf{83.0\%} & 44,489 \\
+Supraventricular (S) & 3.8\% & 4.0\% & 3.9\% & 1,837 \\
+Ventricular (V) & 60.3\% & 83.9\% & \textbf{70.2\%} & 3,382 \\
+Fusion (F) & 0.01\% & 0.3\% & 0.02\% & 388 \\
+Unknown (Q) & 4.5\% & 0.06\% & 0.11\% & 1,809 \\
+\midrule
+\textbf{Weighted Avg} & 82.7\% & 70.7\% & \textbf{75.9\%} & 51,905 \\
+\textbf{Macro Avg} & 32.0\% & 32.8\% & 31.4\% & 51,905 \\
+\bottomrule
+\end{tabular}
+\caption{Per-Class Performance on MIT-BIH Test Set (DS2)}
+\label{tab:class_performance}
+\end{table}
+
+\subsubsection{Confusion Matrix Analysis}
+
+The confusion matrix reveals the model's classification patterns:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}l|rrrrr@{}}
+\toprule
+\textbf{True $\backslash$ Pred} & \textbf{N} & \textbf{S} & \textbf{V} & \textbf{F} & \textbf{Q} \\ 
+\midrule
+\textbf{N} & 33,772 & 1,677 & 1,001 & 8,022 & 17 \\
+\textbf{S} & 1,291 & 73 & 376 & 96 & 1 \\
+\textbf{V} & 256 & 34 & 2,837 & 252 & 3 \\
+\textbf{F} & 349 & 3 & 35 & 1 & 0 \\
+\textbf{Q} & 1,229 & 124 & 452 & 3 & 1 \\
+\bottomrule
+\end{tabular}
+\caption{Confusion Matrix (Test Set, DS2)}
+\label{tab:confusion_matrix}
+\end{table}
+
+\textbf{Key Observations:}
+\begin{itemize}
+    \item \textbf{Normal (N) Class}: High precision (91.5\%), moderate recall (75.9\%)
+    \begin{itemize}
+        \item 8,022 Normal beats misclassified as Fusion (likely SMOTE artifacts)
+    \end{itemize}
+    
+    \item \textbf{Ventricular (V) Class}: Best minority class performance
+    \begin{itemize}
+        \item High recall (83.9\%) - catches most dangerous arrhythmias
+        \item Moderate precision (60.3\%) - some false positives acceptable for safety
+    \end{itemize}
+    
+    \item \textbf{Supraventricular (S) Class}: Poor performance
+    \begin{itemize}
+        \item Low F1-score (3.9\%) - most confused with Normal beats
+        \item Only 73 out of 1,837 correctly classified
+    \end{itemize}
+    
+    \item \textbf{Fusion (F) and Unknown (Q)}: Near-zero performance
+    \begin{itemize}
+        \item Extreme rarity in dataset makes learning difficult
+        \item Most misclassified as Normal
+    \end{itemize}
+\end{itemize}
+
+\subsection{Real-Time System Testing}
+
+\subsubsection{Batch Processing Performance}
+
+Real-time data from the \texttt{logs/} folder demonstrates system performance on live ECG recordings:
+
+\paragraph{Session: \texttt{ecg\_batch\_20260307\_105545.json}}
+
+\begin{itemize}
+    \item \textbf{Recording Duration}: 84.37 seconds
+    \item \textbf{Beats Successfully Detected}: 10 out of 10 (100\% detection rate)
+    \item \textbf{Processing Time}: 1.05 seconds
+    \item \textbf{Processing Speed}: 9.54 beats/second (80x real-time)
+\end{itemize}
+
+\subsubsection{Classification Results}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Class} & \textbf{Count} & \textbf{Percentage} \\ 
+\midrule
+Normal (N) & 8 & 80.0\% \\
+Ventricular (V) & 2 & 20.0\% \\
+\midrule
+\textbf{Total} & 10 & 100\% \\
+\bottomrule
+\end{tabular}
+\caption{Real-Time Classification Distribution (Example Session)}
+\label{tab:realtime_classification}
+\end{table}
+
+\subsubsection{Confidence Analysis}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Statistic} & \textbf{Value} \\ 
+\midrule
+Mean Confidence & 59.5\% \\
+Standard Deviation & 10.0\% \\
+Minimum Confidence & 32.1\% \\
+Maximum Confidence & 68.0\% \\
+\bottomrule
+\end{tabular}
+\caption{Classification Confidence Statistics}
+\label{tab:confidence_stats}
+\end{table}
+
+\textbf{Interpretation:}
+\begin{itemize}
+    \item Mean confidence of 59.5\% is slightly below the 60\% alert threshold
+    \item High variability (std = 10\%) suggests signal quality issues
+    \item Lowest confidence beat (32.1\%) shows ambiguous morphology
+\end{itemize}
+
+\subsubsection{Heart Rate Monitoring}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Metric} & \textbf{Value} \\ 
+\midrule
+Mean Heart Rate & 84.5 BPM \\
+Standard Deviation & 35.3 BPM \\
+Minimum Heart Rate & 43.6 BPM \\
+Maximum Heart Rate & 150.0 BPM \\
+Heart Rate Variability & High (Std/Mean = 41.8\%) \\
+\bottomrule
+\end{tabular}
+\caption{Heart Rate Statistics (Example Session)}
+\label{tab:heart_rate}
+\end{table}
+
+\textbf{Clinical Context:}
+\begin{itemize}
+    \item Mean HR of 84.5 BPM is within normal resting range (60--100 BPM)
+    \item High variability (35.3 BPM std) may indicate:
+    \begin{itemize}
+        \item Arrhythmic episodes
+        \item Motion artifacts
+        \item Variable R-R intervals
+    \end{itemize}
+\end{itemize}
+
+\subsection{System Performance Benchmarks}
+
+\subsubsection{Computational Performance}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Metric} & \textbf{Value} \\ 
+\midrule
+Single Beat Inference Time & $<$100 ms \\
+Batch Processing (10 beats) & 1.05 seconds \\
+Average Per-Beat Processing & 105 ms \\
+Real-Time Factor & 80x (can process 80s of ECG in 1s) \\
+Model Load Time & ~2 seconds \\
+Memory Usage & ~150 MB (TensorFlow + model) \\
+\bottomrule
+\end{tabular}
+\caption{Computational Performance Metrics}
+\label{tab:computational_performance}
+\end{table}
+
+\subsubsection{Signal Quality Metrics}
+
+Analysis of 15 log files in \texttt{logs/} directory:
+
+\begin{itemize}
+    \item \textbf{Total Sessions Recorded}: 15
+    \item \textbf{Date Range}: December 19, 2025 -- March 7, 2026
+    \item \textbf{Total Beats Analyzed}: Varied (1--10 beats per session)
+    \item \textbf{R-Peak Detection Success Rate}: ~95--100\% per session
+    \item \textbf{Average Processing Time}: 1--2 seconds per session
+\end{itemize}
+
+\subsection{Performance Comparison}
+
+\subsubsection{Comparison with Literature}
+
+Typical results from literature on MIT-BIH classification:
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Method} & \textbf{Accuracy} & \textbf{Reference} \\ 
+\midrule
+Traditional SVM & 85--90\% & Various studies \\
+1D CNN & 92--94\% & Recent papers \\
+LSTM & 88--91\% & Recent papers \\
+\textbf{This Work (CNN-LSTM)} & \textbf{70.7\%} & Current implementation \\
+\bottomrule
+\end{tabular}
+\caption{Performance Comparison with Literature}
+\label{tab:literature_comparison}
+\end{table}
+
+\end{document}

@@ -18,7 +18,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from realtime.serial_reader import ECGSerialReader
-from realtime.inference_engine import RealtimeInferenceEngine
+from realtime.batch_processor import BatchECGProcessor
 
 
 # Page configuration
@@ -73,26 +73,26 @@ st.markdown("""
 # Initialize session state
 if 'serial_reader' not in st.session_state:
     st.session_state.serial_reader = None
-if 'inference_engine' not in st.session_state:
-    st.session_state.inference_engine = None
+if 'batch_processor' not in st.session_state:
+    st.session_state.batch_processor = None
 if 'ecg_buffer' not in st.session_state:
-    st.session_state.ecg_buffer = deque(maxlen=3600)  # 10 seconds at 360 Hz
+    st.session_state.ecg_buffer = deque(maxlen=36000)  # 100 seconds at 360 Hz
 if 'time_buffer' not in st.session_state:
-    st.session_state.time_buffer = deque(maxlen=3600)
-if 'classification_history' not in st.session_state:
-    st.session_state.classification_history = []
-if 'alert_history' not in st.session_state:
-    st.session_state.alert_history = []
-if 'heart_rate_buffer' not in st.session_state:
-    st.session_state.heart_rate_buffer = deque(maxlen=100)
+    st.session_state.time_buffer = deque(maxlen=36000)
+if 'complete_ecg_signal' not in st.session_state:
+    st.session_state.complete_ecg_signal = []
 if 'is_running' not in st.session_state:
     st.session_state.is_running = False
 if 'start_time' not in st.session_state:
     st.session_state.start_time = 0
+if 'session_duration' not in st.session_state:
+    st.session_state.session_duration = 30  # Default 30 seconds
+if 'last_session_results' not in st.session_state:
+    st.session_state.last_session_results = None
 
 
-def initialize_system(serial_port, model_path):
-    """Initialize serial reader and inference engine"""
+def initialize_system(serial_port, model_path, session_duration):
+    """Initialize serial reader and batch processor"""
     try:
         # Initialize serial reader
         reader = ECGSerialReader(port=serial_port)
@@ -101,71 +101,169 @@ def initialize_system(serial_port, model_path):
         reader.start_reading()
         st.session_state.serial_reader = reader
         
-        # Initialize inference engine
-        engine = RealtimeInferenceEngine(model_path=model_path)
-        st.session_state.inference_engine = engine
+        # Initialize batch processor
+        processor = BatchECGProcessor(model_path=model_path, sampling_rate=360)
+        st.session_state.batch_processor = processor
+        
+        # Reset buffers
+        st.session_state.ecg_buffer.clear()
+        st.session_state.time_buffer.clear()
+        st.session_state.complete_ecg_signal = []
         
         st.session_state.is_running = True
         st.session_state.start_time = time.time()
+        st.session_state.session_duration = session_duration
         
-        return True, "System initialized successfully"
+        return True, f"System initialized - Recording for {session_duration} seconds..."
     except Exception as e:
         return False, f"Error initializing system: {str(e)}"
 
 
 def stop_system():
-    """Stop system and close connections"""
-    if st.session_state.serial_reader:
-        st.session_state.serial_reader.stop_reading()
-        st.session_state.serial_reader = None
+    """Stop system and process complete recording"""
+    results = None
     
-    st.session_state.inference_engine = None
+    try:
+        # Stop serial reading first
+        if st.session_state.serial_reader:
+            st.session_state.serial_reader.stop_reading()
+            st.session_state.serial_reader = None
+        
+        # Get complete ECG signal
+        complete_signal = np.array(st.session_state.complete_ecg_signal)
+        
+        duration_sec = len(complete_signal) / 360
+        
+        # Check minimum duration
+        if len(complete_signal) < 360:  # Less than 1 second
+            st.error("⚠️ Recording too short for analysis (< 1 second)")
+            st.session_state.is_running = False
+            return None
+        
+        if len(complete_signal) < 5400:  # Less than 15 seconds
+            st.warning(f"⚠️ Short recording ({duration_sec:.1f}s). Recommend at least 15 seconds for reliable analysis.")
+        
+        # Display signal statistics
+        st.info(f"📊 Signal collected: {len(complete_signal)} samples ({duration_sec:.1f}s)")
+        st.write(f"  - Mean: {np.mean(complete_signal):.2f}")
+        st.write(f"  - Std Dev: {np.std(complete_signal):.2f}")
+        st.write(f"  - Range: {np.max(complete_signal) - np.min(complete_signal):.2f}")
+        
+        # Process the complete recording
+        if st.session_state.batch_processor:
+            st.info(f"🔄 Processing {len(complete_signal)/360:.1f} seconds of ECG data...")
+            results = st.session_state.batch_processor.process_recording(complete_signal)
+            
+            # Check for errors
+            if 'error' in results:
+                st.error(f"❌ Processing failed: {results['error']}")
+                if 'quality' in results:
+                    st.warning("Signal Quality Issues:")
+                    for warning in results['quality'].get('warnings', []):
+                        st.write(f"  - {warning}")
+                st.session_state.is_running = False
+                return None
+            
+            # Check if too few beats detected
+            duration_sec = len(complete_signal) / 360
+            expected_min_beats = int((40 / 60) * duration_sec)
+            
+            if results['total_beats'] < expected_min_beats / 2:
+                st.error(f"⚠️ Very few beats detected: {results['total_beats']} beats in {duration_sec:.1f}s")
+                st.warning("""
+                **Possible causes:**
+                1. Poor electrode contact - check connections
+                2. Incorrect electrode placement - follow standard lead II placement
+                3. Signal noise - ensure cables are not moving
+                4. Low signal amplitude - check if ECG sensor is powered correctly
+                
+                **Recommendations:**
+                - Ensure electrodes are firmly attached to skin
+                - Use electrode gel if available
+                - Keep cables still during recording
+                - Try a longer recording (30-60 seconds recommended)
+                """)
+            
+            # Store results
+            st.session_state.last_session_results = results
+            
+            # Save to file
+            import json
+            from datetime import datetime
+            session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            results['session_id'] = session_id
+            
+            import os
+            os.makedirs('./logs', exist_ok=True)
+            log_path = f'./logs/ecg_batch_{session_id}.json'
+            with open(log_path, 'w') as f:
+                json.dump(results, f, indent=2)
+            
+            if results['total_beats'] > 0:
+                st.success(f"✅ Processing complete! Analyzed {results['total_beats']} beats")
+                st.info(f"📁 Results saved to: {log_path}")
+            else:
+                st.warning(f"⚠️ Processing complete but no beats detected. Check signal quality.")
+                st.info(f"📁 Results saved to: {log_path}")
+        
+    except Exception as e:
+        st.error(f"Error processing recording: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
+    
+    st.session_state.batch_processor = None
     st.session_state.is_running = False
+    
+    return results
 
 
 def update_data():
-    """Update data from serial reader and inference engine"""
+    """Update data from serial reader - just collect, don't classify"""
     if not st.session_state.is_running:
         return
     
     reader = st.session_state.serial_reader
-    engine = st.session_state.inference_engine
     
-    if reader is None or engine is None:
+    if reader is None:
         return
     
-    # Read new samples from serial
-    samples = reader.get_samples(count=10, timeout=0.1)
+    # Check if session duration exceeded
+    elapsed_time = time.time() - st.session_state.start_time
+    if elapsed_time >= st.session_state.session_duration:
+        # Auto-stop and process
+        st.warning(f"⏱️ Session duration ({st.session_state.session_duration}s) reached - stopping and processing...")
+        stop_system()
+        st.rerun()
+        return
+    
+    # Read ALL available samples from serial (don't limit to just 10!)
+    # At 360 Hz with 200ms refresh, we should get ~72 samples per update
+    samples = reader.get_samples(count=200, timeout=0.01)  # Get up to 200 samples
     
     if samples:
         for sample in samples:
             if not sample['leads_off']:
-                # Add to buffer
+                # Add to display buffer
                 st.session_state.ecg_buffer.append(sample['ecg'])
                 st.session_state.time_buffer.append(time.time() - st.session_state.start_time)
                 
-                # Add to inference engine
-                engine.add_samples(np.array([sample['ecg']]))
-        
-        # Process buffer for classification
-        engine.process_buffer()
-        
-        # Get classification results
-        result = engine.get_latest_result()
-        if result:
-            st.session_state.classification_history.append(result)
-            
-            # Check for alerts
-            if 'alert' in result:
-                st.session_state.alert_history.append(result['alert'])
-            
-            # Calculate heart rate
-            if len(st.session_state.classification_history) >= 2:
-                recent_beats = st.session_state.classification_history[-10:]
-                time_diff = recent_beats[-1]['timestamp'] - recent_beats[0]['timestamp']
-                if time_diff > 0:
-                    hr = (len(recent_beats) / time_diff) * 60
-                    st.session_state.heart_rate_buffer.append(hr)
+                # Add to complete signal for batch processing
+                st.session_state.complete_ecg_signal.append(sample['ecg'])
+    
+    # If still not getting enough samples, warn about serial issues
+    elapsed_time = time.time() - st.session_state.start_time
+    if elapsed_time > 2.0:  # After 2 seconds
+        expected_samples = int(elapsed_time * 360)
+        actual_samples = len(st.session_state.complete_ecg_signal)
+        if actual_samples < expected_samples * 0.5:  # Less than 50%
+            # Try to drain more from the queue
+            extra_samples = reader.get_samples(count=500, timeout=0.001)
+            if extra_samples:
+                for sample in extra_samples:
+                    if not sample['leads_off']:
+                        st.session_state.ecg_buffer.append(sample['ecg'])
+                        st.session_state.time_buffer.append(time.time() - st.session_state.start_time)
+                        st.session_state.complete_ecg_signal.append(sample['ecg'])
 
 
 def plot_ecg_waveform():
@@ -198,31 +296,35 @@ def plot_ecg_waveform():
     return fig
 
 
-def plot_class_distribution():
-    """Plot classification distribution"""
-    if len(st.session_state.classification_history) == 0:
-        return go.Figure()
+def plot_class_distribution(results=None):
+    """Plot classification distribution from batch results"""
+    fig = go.Figure()
     
-    recent_classifications = st.session_state.classification_history[-100:]
-    classes = [c['class'] for c in recent_classifications]
-    class_names = ['Normal', 'Supraventricular', 'Ventricular', 'Fusion', 'Unknown']
-    class_labels = ['N', 'S', 'V', 'F', 'Q']
-    
-    counts = [classes.count(label) for label in class_labels]
-    
-    colors = ['#00cc00', '#ffaa00', '#ff0000', '#ff00ff', '#888888']
-    
-    fig = go.Figure(data=[go.Pie(
-        labels=class_names,
-        values=counts,
-        marker=dict(colors=colors),
-        hole=0.3
-    )])
-    
-    fig.update_layout(
-        title='Beat Classification Distribution (Last 100 beats)',
-        height=350
-    )
+    if results and 'class_distribution' in results:
+        class_names = list(results['class_distribution'].keys())
+        counts = list(results['class_distribution'].values())
+        
+        colors = {
+            'Normal': '#00cc00',
+            'Supraventricular': '#ffaa00',
+            'Ventricular': '#ff0000',
+            'Fusion': '#ff00ff',
+            'Unknown': '#888888'
+        }
+        
+        color_list = [colors.get(name, '#cccccc') for name in class_names]
+        
+        fig = go.Figure(data=[go.Pie(
+            labels=class_names,
+            values=counts,
+            marker=dict(colors=color_list),
+            hole=0.3
+        )])
+        
+        fig.update_layout(
+            title='Beat Classification Distribution',
+            height=350
+        )
     
     return fig
 
@@ -241,21 +343,25 @@ def main():
         # Configuration
         serial_port = st.text_input("Serial Port", value="", help="Leave empty for auto-detect")
         model_path = st.text_input("Model Path", value="./models/best_model.h5")
+        session_duration = st.slider("Session Duration (seconds)", 15, 300, 30, step=5,
+                                     disabled=st.session_state.is_running,
+                                     help="Recording will auto-stop after this duration. Minimum 15s recommended for reliable analysis.")
         
         # Start/Stop buttons
         col1, col2 = st.columns(2)
         with col1:
             if st.button("▶️ Start", disabled=st.session_state.is_running):
-                success, message = initialize_system(serial_port if serial_port else None, model_path)
+                success, message = initialize_system(serial_port if serial_port else None, model_path, session_duration)
                 if success:
                     st.success(message)
+                    st.rerun()
                 else:
                     st.error(message)
         
         with col2:
             if st.button("⏹️ Stop", disabled=not st.session_state.is_running):
-                stop_system()
-                st.info("System stopped")
+                results = stop_system()
+                st.rerun()
         
         st.markdown("---")
         
@@ -263,140 +369,188 @@ def main():
         st.header("System Status")
         
         if st.session_state.is_running:
-            st.success("🟢 Running")
+            elapsed = time.time() - st.session_state.start_time
+            remaining = st.session_state.session_duration - elapsed
+            st.success(f"🟢 Recording... {elapsed:.1f}s / {st.session_state.session_duration}s")
+            st.progress(min(1.0, elapsed / st.session_state.session_duration))
+            st.info(f"⏱️ Time Remaining: {remaining:.1f}s")
             
             # Connection status
             if st.session_state.serial_reader:
                 stats = st.session_state.serial_reader.get_stats()
-                st.metric("Serial Connection", "Connected")
-                st.metric("Total Samples", stats['total_samples'])
-                st.metric("Queue Size", stats['queue_size'])
-            
-            # Inference status
-            if st.session_state.inference_engine:
-                stats = st.session_state.inference_engine.get_statistics()
-                st.metric("Beats Classified", stats['total_beats'])
-                st.metric("Avg Inference Time", f"{stats['avg_inference_time_ms']:.1f} ms")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Connection", "✅ Connected")
+                with col2:
+                    st.metric("Samples Collected", stats['total_samples'])
+                with col3:
+                    st.metric("Signal Length", f"{len(st.session_state.complete_ecg_signal)/360:.1f}s")
         else:
             st.warning("🔴 Stopped")
         
         st.markdown("---")
         
         # Auto-refresh control
-        refresh_rate = st.slider("Refresh Rate (ms)", 100, 1000, 200)
+        refresh_rate = st.slider("Refresh Rate (ms)", 50, 500, 100, step=50,
+                                 help="Faster refresh = better data collection (100ms recommended)")
     
     # Main content area
     if st.session_state.is_running:
         # Update data
         update_data()
         
-        # Top row - Metrics
-        col1, col2, col3, col4 = st.columns(4)
+        st.header("📊 Live ECG Signal")
         
+        # Check if we're getting enough data
+        elapsed = time.time() - st.session_state.start_time
+        expected_samples = int(elapsed * 360)  # 360 Hz
+        actual_samples = len(st.session_state.complete_ecg_signal)
+        sample_rate_pct = (actual_samples / max(1, expected_samples)) * 100 if expected_samples > 0 else 0
+        
+        if sample_rate_pct < 50:
+            st.error(f"⚠️ LOW DATA RATE: Only receiving {sample_rate_pct:.1f}% of expected samples!")
+            st.warning("Check Arduino connection and serial port settings.")
+        elif sample_rate_pct < 80:
+            st.warning(f"⚠️ Reduced data rate: {sample_rate_pct:.1f}% of expected samples")
+        else:
+            st.info("💚 Recording in progress... Click STOP when ready to analyze.")
+        
+        # ECG Waveform - Just show the live signal
+        st.plotly_chart(plot_ecg_waveform(), width='stretch', key='ecg_waveform_chart')
+        
+        # Signal statistics
+        col1, col2, col3 = st.columns(3)
         with col1:
-            if len(st.session_state.heart_rate_buffer) > 0:
-                hr = np.mean(list(st.session_state.heart_rate_buffer)[-10:])
-                st.metric("Heart Rate", f"{hr:.0f} BPM", delta=None)
-            else:
-                st.metric("Heart Rate", "-- BPM")
-        
+            signal_std = np.std(list(st.session_state.ecg_buffer)[-360:]) if len(st.session_state.ecg_buffer) > 360 else 0
+            signal_quality = "✅ Good" if signal_std > 10 else "⚠️ Low"
+            st.metric("Signal Quality", signal_quality)
         with col2:
-            total_beats = len(st.session_state.classification_history)
-            st.metric("Total Beats", total_beats)
-        
+            st.metric("Samples Collected", f"{actual_samples}")
         with col3:
-            if st.session_state.classification_history:
-                latest = st.session_state.classification_history[-1]
-                st.metric("Latest Class", latest['class_full'])
-            else:
-                st.metric("Latest Class", "--")
-        
-        with col4:
-            confidence = 0
-            if st.session_state.classification_history:
-                confidence = st.session_state.classification_history[-1]['confidence'] * 100
-            st.metric("Confidence", f"{confidence:.1f}%")
-        
-        # Alert Panel
-        if st.session_state.alert_history:
-            latest_alert = st.session_state.alert_history[-1]
-            alert_type = latest_alert['type']
-            
-            if alert_type == 'CRITICAL':
-                st.markdown(f"""
-                <div class="alert-critical">
-                    🚨 CRITICAL ALERT: {latest_alert['message']}
-                </div>
-                """, unsafe_allow_html=True)
-            elif alert_type == 'WARNING':
-                st.markdown(f"""
-                <div class="alert-warning">
-                    ⚠️ WARNING: {latest_alert['message']}
-                </div>
-                """, unsafe_allow_html=True)
-            else:
-                st.markdown(f"""
-                <div class="alert-info">
-                    ℹ️ INFO: {latest_alert['message']}
-                </div>
-                """, unsafe_allow_html=True)
-        
-        # ECG Waveform
-        st.plotly_chart(plot_ecg_waveform(), use_container_width=True)
-        
-        # Bottom row - Charts
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            # Recent classifications table
-            st.subheader("Recent Classifications")
-            if st.session_state.classification_history:
-                recent = st.session_state.classification_history[-10:]
-                df = pd.DataFrame([{
-                    'Time': datetime.fromtimestamp(r['timestamp']).strftime('%H:%M:%S'),
-                    'Class': r['class_full'],
-                    'Confidence': f"{r['confidence']*100:.1f}%"
-                } for r in reversed(recent)])
-                st.dataframe(df, use_container_width=True, hide_index=True)
-            else:
-                st.info("No classifications yet")
-        
-        with col2:
-            # Class distribution pie chart
-            st.plotly_chart(plot_class_distribution(), use_container_width=True)
-        
-        # Alert History
-        with st.expander("Alert History", expanded=False):
-            if st.session_state.alert_history:
-                df_alerts = pd.DataFrame([{
-                    'Time': datetime.fromtimestamp(a['timestamp']).strftime('%H:%M:%S'),
-                    'Type': a['type'],
-                    'Message': a['message']
-                } for a in reversed(st.session_state.alert_history[-20:])])
-                st.dataframe(df_alerts, use_container_width=True, hide_index=True)
-            else:
-                st.info("No alerts")
+            st.metric("Data Rate", f"{sample_rate_pct:.0f}%")
         
         # Auto-refresh
         time.sleep(refresh_rate / 1000.0)
         st.rerun()
     
     else:
-        # Welcome screen
-        st.info("👈 Configure settings and click 'Start' to begin monitoring")
+        # Check if there are batch processing results to display
+        if 'last_session_results' in st.session_state and st.session_state.last_session_results:
+            st.success("✅ Analysis Complete!")
+            
+            results = st.session_state.last_session_results
+            
+            # Session Summary
+            st.header("📊 Session Analysis Results")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Duration", f"{results['signal_duration']:.1f}s")
+            with col2:
+                avg_hr = results['heart_rate']['mean']
+                st.metric("Avg Heart Rate", f"{avg_hr:.0f} BPM" if avg_hr > 0 else "N/A")
+            with col3:
+                avg_conf = results['confidence']['mean'] * 100
+                st.metric("Avg Confidence", f"{avg_conf:.1f}%")
+            
+            st.markdown("---")
+            
+            # Classification Distribution
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.subheader("Beat Classification Distribution")
+                
+                # Define all classes with icons
+                all_classes = {
+                    'Normal': '✅',
+                    'Supraventricular': '⚠️',
+                    'Ventricular': '🔴',
+                    'Fusion': '🔶',
+                    'Unknown': '❓'
+                }
+                
+                # Show all classes with percentages only (no beat counts)
+                st.write("---")
+                for class_name, icon in all_classes.items():
+                    pct = results['class_percentages'].get(class_name, 0)
+                    st.write(f"{icon} **{class_name}**: {pct:.1f}%")
+            
+            with col2:
+                st.subheader("Confidence Analysis")
+                conf = results['confidence']
+                st.write(f"**Mean**: {conf['mean']*100:.1f}%")
+                st.write(f"**Std Dev**: {conf['std']*100:.1f}%")
+                st.write(f"**Range**: {conf['min']*100:.1f}% - {conf['max']*100:.1f}%")
+            
+            # Visual distribution chart
+            st.plotly_chart(plot_class_distribution(results), width='stretch', key='results_class_distribution')
+            
+            st.markdown("---")
+            
+            # Heart Rate Analysis
+            if results['heart_rate']['mean'] > 0:
+                st.subheader("❤️ Heart Rate Analysis")
+                hr = results['heart_rate']
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Mean HR", f"{hr['mean']:.0f} BPM")
+                with col2:
+                    st.metric("Std Dev", f"{hr['std']:.0f} BPM")
+                with col3:
+                    st.metric("Min HR", f"{hr['min']:.0f} BPM")
+                with col4:
+                    st.metric("Max HR", f"{hr['max']:.0f} BPM")
+                
+                st.markdown("---")
+            
+            # Processing Performance
+            st.subheader("⚡ Processing Performance")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("R-peaks Detected", results['r_peaks_detected'])
+            with col2:
+                st.metric("Valid Beats", results['valid_beats_segmented'])
+            with col3:
+                st.metric("Processing Time", f"{results['processing_time']:.2f}s")
+            
+            st.markdown("---")
+            
+            # Button to clear results
+            if st.button("Start New Session"):
+                st.session_state.last_session_results = None
+                st.rerun()
         
-        st.markdown("""
-        ### Instructions:
-        1. **Connect Hardware**: Ensure Arduino with AD8232 is connected via USB
-        2. **Configure Settings**: Set serial port (or leave empty for auto-detect)
-        3. **Load Model**: Specify path to trained model (.h5 file)
-        4. **Start Monitoring**: Click the Start button
-        5. **Attach Electrodes**: Place ECG electrodes on patient
-        
-        ### Safety Notice:
-        This system is for educational and research purposes only.
-        Do not use for clinical diagnosis without proper validation and regulatory approval.
-        """)
+        else:
+            # Welcome screen
+            st.info("👈 Configure settings and click 'Start' to begin recording")
+            
+            st.markdown("""
+            ### 📋 How It Works:
+            
+            **During Recording:**
+            - System displays LIVE ECG waveform only
+            - No classification during recording (faster, no duplicates)
+            - Fixed duration session (30-300 seconds)
+            
+            **After Stopping:**
+            - Batch processes the ENTIRE recording at once
+            - More accurate R-peak detection
+            - Complete beat-by-beat classification
+            - Comprehensive analysis report
+            - Results saved to JSON log files
+            
+            ### Instructions:
+            1. **Connect Hardware**: Arduino with AD8232 via USB
+            2. **Set Duration**: Choose recording length (60s recommended)
+            3. **Start Recording**: Click Start button
+            4. **Wait**: System auto-stops after duration
+            5. **View Results**: Complete analysis displayed automatically
+            
+            ### Safety Notice:
+            ⚠️ For educational and research purposes ONLY.
+            Do not use for clinical diagnosis.
+            """)
 
 
 if __name__ == "__main__":

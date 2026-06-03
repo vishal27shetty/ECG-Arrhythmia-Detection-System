@@ -420,7 +420,7 @@ def main():
                 with col3:
                     st.metric("Signal Length", f"{len(st.session_state.complete_ecg_signal)/360:.1f}s")
         else:
-            st.warning("🔴 Stopped")
+            st.warning("Stopped")
         
         st.markdown("---")
         
@@ -562,7 +562,7 @@ def main():
             platform_note = ""
             if IS_PI:
                 platform_note = """
-            ### 🍓 Raspberry Pi Mode Active
+            ### Raspberry Pi Mode Active
             - Using **TFLite** runtime for lightweight inference
             - Reduced buffer sizes to save RAM
             - Default serial port: `/dev/ttyUSB0`
@@ -570,7 +570,7 @@ def main():
             """
             
             st.markdown(f"""
-            ### 📋 How It Works:
+            ### How It Works:
             
             **During Recording:**
             - System displays LIVE ECG waveform only

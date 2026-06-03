@@ -4,4 +4,4 @@ pyserial>=3.5
 streamlit>=1.28.0
 plotly>=5.17.0
 pandas>=2.1.0
-tflite-runtime
+ai-edge-litert>=2.1.0

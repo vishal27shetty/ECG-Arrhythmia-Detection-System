@@ -59,17 +59,40 @@ class BatchECGProcessor:
     
     def _load_tflite_model(self, model_path: str):
         """Load a TFLite model for lightweight inference on Raspberry Pi"""
-        try:
-            import tflite_runtime.interpreter as tflite
-        except ImportError:
-            from tensorflow import lite as tflite
-            tflite.Interpreter = tflite.Interpreter  # compatibility shim
-        
+        tflite = self._get_tflite_module()
         self.interpreter = tflite.Interpreter(model_path=model_path)
         self.interpreter.allocate_tensors()
         self._input_details = self.interpreter.get_input_details()
         self._output_details = self.interpreter.get_output_details()
         print("TFLite model loaded successfully (Pi mode)")
+
+    @staticmethod
+    def _get_tflite_module():
+        """Return a TFLite interpreter module (Python 3.12+ compatible)."""
+        backends = (
+            ('ai-edge-litert', 'ai_edge_litert.interpreter'),
+            ('tflite-runtime', 'tflite_runtime.interpreter'),
+        )
+        errors = []
+        for name, module_path in backends:
+            try:
+                module = __import__(module_path, fromlist=['interpreter'])
+                print(f"Using {name} for inference")
+                return module
+            except ImportError as exc:
+                errors.append(f"{name}: {exc}")
+
+        try:
+            from tensorflow import lite as tflite
+            print("Using tensorflow.lite fallback for inference")
+            return tflite
+        except ImportError as exc:
+            errors.append(f"tensorflow.lite: {exc}")
+
+        raise ImportError(
+            "No TFLite runtime found. On Raspberry Pi run: pip install ai-edge-litert"
+            + (f" ({'; '.join(errors)})" if errors else "")
+        )
     
     def _load_keras_model(self, model_path: str):
         """Load a full Keras model (desktop mode)"""

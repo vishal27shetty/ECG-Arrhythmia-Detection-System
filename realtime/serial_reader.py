@@ -43,7 +43,12 @@ class ECGSerialReader:
         self.total_samples = 0
         self.dropped_samples = 0
         self.leads_off_count = 0
+        self.last_error: Optional[str] = None
         
+    def list_available_ports(self) -> List[str]:
+        """Return all detected serial ports."""
+        return [port.device for port in serial.tools.list_ports.comports()]
+
     def auto_detect_port(self) -> Optional[str]:
         """
         Automatically detect Arduino serial port.
@@ -52,31 +57,35 @@ class ECGSerialReader:
         Returns:
             Port name if found, None otherwise
         """
-        ports = serial.tools.list_ports.comports()
-        
-        arduino_keywords = ['arduino', 'ch340', 'ch341', 'cp210', 'ftdi', 'usb', 'acm']
-        
+        ports = list(serial.tools.list_ports.comports())
+        if not ports:
+            return None
+
+        arduino_keywords = ['arduino', 'ch340', 'ch341', 'cp210', 'ftdi', 'usb serial', 'acm']
+
         for port in ports:
             manufacturer = port.manufacturer or ''
-            port_info = (port.device + port.description + manufacturer).lower()
+            port_info = (port.device + ' ' + port.description + ' ' + manufacturer).lower()
             for keyword in arduino_keywords:
                 if keyword in port_info:
                     print(f"Auto-detected Arduino on port: {port.device}")
                     return port.device
-        
-        # On Linux/Pi, prefer /dev/ttyUSB* or /dev/ttyACM* over other ports
+
+        # On Linux/Pi: Uno/Leonardo usually appear as ttyACM*, CH340 clones as ttyUSB*
         import platform
         if platform.system() == 'Linux':
-            for port in ports:
-                if '/dev/ttyUSB' in port.device or '/dev/ttyACM' in port.device:
-                    print(f"Using Linux serial port: {port.device}")
-                    return port.device
-        
-        if ports:
-            print(f"Using first available port: {ports[0].device}")
-            return ports[0].device
-        
-        return None
+            linux_ports = sorted(port.device for port in ports)
+            for device in linux_ports:
+                if device.startswith('/dev/ttyACM'):
+                    print(f"Using Linux serial port: {device}")
+                    return device
+            for device in linux_ports:
+                if device.startswith('/dev/ttyUSB'):
+                    print(f"Using Linux serial port: {device}")
+                    return device
+
+        print(f"Using first available port: {ports[0].device}")
+        return ports[0].device
     
     def connect(self) -> bool:
         """
@@ -85,34 +94,66 @@ class ECGSerialReader:
         Returns:
             True if connection successful, False otherwise
         """
-        try:
-            # Auto-detect port if not specified
-            if self.port is None:
-                self.port = self.auto_detect_port()
-                if self.port is None:
-                    print("Error: No serial ports found")
-                    return False
-            
-            # Open serial connection
-            self.serial_conn = serial.Serial(
-                port=self.port,
-                baudrate=self.baudrate,
-                timeout=1.0,
-                write_timeout=1.0
-            )
-            
-            # Wait for Arduino to reset
-            time.sleep(2)
-            
-            # Flush any existing data
-            self.serial_conn.reset_input_buffer()
-            
-            print(f"Connected to Arduino on {self.port} at {self.baudrate} baud")
-            return True
-            
-        except serial.SerialException as e:
-            print(f"Error connecting to serial port: {e}")
+        self.last_error = None
+        requested_port = self.port
+
+        # Resolve port: try requested first, then auto-detect
+        ports_to_try = []
+        if requested_port:
+            ports_to_try.append(requested_port)
+        detected = self.auto_detect_port()
+        if detected and detected not in ports_to_try:
+            ports_to_try.append(detected)
+
+        if not ports_to_try:
+            self.last_error = "No serial ports found. Check USB cable and Arduino power."
+            print(f"Error: {self.last_error}")
             return False
+
+        last_exception = None
+        for port in ports_to_try:
+            try:
+                if self.serial_conn and self.serial_conn.is_open:
+                    self.serial_conn.close()
+
+                self.serial_conn = serial.Serial(
+                    port=port,
+                    baudrate=self.baudrate,
+                    timeout=1.0,
+                    write_timeout=1.0
+                )
+                self.port = port
+
+                # Wait for Arduino to reset after DTR toggle
+                time.sleep(2)
+
+                # Flush any existing data
+                self.serial_conn.reset_input_buffer()
+
+                print(f"Connected to Arduino on {self.port} at {self.baudrate} baud")
+                return True
+
+            except serial.SerialException as e:
+                last_exception = e
+                print(f"Error connecting to {port}: {e}")
+
+        available = self.list_available_ports()
+        available_text = ', '.join(available) if available else 'none detected'
+        tried_text = ', '.join(ports_to_try)
+        hint = ""
+        if last_exception and 'Permission denied' in str(last_exception):
+            hint = " Try: sudo usermod -aG dialout $USER (then log out/in), or run ./start_pi.sh."
+        elif not available:
+            hint = " Plug Arduino into USB and verify the board is powered."
+
+        self.last_error = (
+            f"Could not open serial port. Tried: {tried_text}. "
+            f"Available ports: {available_text}.{hint}"
+        )
+        if last_exception:
+            self.last_error += f" Last error: {last_exception}"
+        print(f"Error connecting to serial port: {self.last_error}")
+        return False
     
     def start_reading(self):
         """Start reading data from Arduino in background thread"""

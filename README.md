@@ -197,7 +197,8 @@ Arduino 3.3V      ──►  AD8232 3.3V
 - A heat-sink or fan is recommended during long sessions
 - The dashboard auto-detects Pi mode via CPU architecture; you can also
   force it with `export ECGPI=1`
-- Use `requirements_pi.txt` — it skips TensorFlow and heavy training libs
+- Use `requirements_pi.txt` — it uses `ai-edge-litert` (not deprecated `tflite-runtime`)
+- **Python 3.12+ error `No module named 'imp'`?** Reinstall deps: `pip install -r requirements_pi.txt`
 - Serial permission issues? Run `sudo usermod -aG dialout $USER` and reboot
 
 ## 🚀 Training the Model

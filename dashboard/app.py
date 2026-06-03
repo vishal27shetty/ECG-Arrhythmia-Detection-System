@@ -37,7 +37,7 @@ IS_PI = (
 PI_DEFAULTS = {
     'buffer_maxlen': 7200,      # ~20 s at 360 Hz (saves RAM)
     'model_path': './models/best_model.tflite',
-    'serial_port': '/dev/ttyUSB0',
+    'serial_port': '',          # auto-detect (Uno=/dev/ttyACM0, CH340=/dev/ttyUSB0)
     'refresh_default': 250,     # slower refresh to ease CPU
     'session_default': 30,
 }
@@ -127,7 +127,8 @@ def initialize_system(serial_port, model_path, session_duration):
         # Initialize serial reader
         reader = ECGSerialReader(port=serial_port)
         if not reader.connect():
-            return False, "Failed to connect to Arduino"
+            detail = reader.last_error or "Unknown serial error"
+            return False, f"Failed to connect to Arduino. {detail}"
         reader.start_reading()
         st.session_state.serial_reader = reader
         
@@ -385,7 +386,8 @@ def main():
         col1, col2 = st.columns(2)
         with col1:
             if st.button("▶️ Start", disabled=st.session_state.is_running):
-                success, message = initialize_system(serial_port if serial_port else None, model_path, session_duration)
+                port = serial_port.strip() if serial_port else None
+                success, message = initialize_system(port, model_path, session_duration)
                 if success:
                     st.success(message)
                     st.rerun()
@@ -565,7 +567,7 @@ def main():
             ### Raspberry Pi Mode Active
             - Using **TFLite** runtime for lightweight inference
             - Reduced buffer sizes to save RAM
-            - Default serial port: `/dev/ttyUSB0`
+            - Default serial port: auto-detect (`/dev/ttyACM0` or `/dev/ttyUSB0`)
             - Tip: use `ECGPI=1 streamlit run dashboard/app.py` to force Pi mode
             """
             

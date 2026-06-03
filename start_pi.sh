@@ -19,17 +19,28 @@ if [ -d "venv/bin" ]; then
 fi
 
 # Grant serial access (Pi often needs this)
-SERIAL_PORT="${1:-/dev/ttyUSB0}"
-if [ -e "$SERIAL_PORT" ]; then
-    sudo chmod 666 "$SERIAL_PORT" 2>/dev/null || true
+if [ -n "$1" ]; then
+    SERIAL_PORT="$1"
+elif [ -e /dev/ttyACM0 ]; then
+    SERIAL_PORT="/dev/ttyACM0"
+elif [ -e /dev/ttyUSB0 ]; then
+    SERIAL_PORT="/dev/ttyUSB0"
+else
+    SERIAL_PORT=""
 fi
+
+for PORT in /dev/ttyACM* /dev/ttyUSB*; do
+    if [ -e "$PORT" ]; then
+        sudo chmod 666 "$PORT" 2>/dev/null || true
+    fi
+done
 
 export ECGPI=1
 
 echo "============================================"
 echo "  ECG Arrhythmia Monitor — Raspberry Pi"
 echo "============================================"
-echo "  Serial port : $SERIAL_PORT"
+echo "  Serial port : ${SERIAL_PORT:-auto-detect}"
 echo "  Model       : models/best_model.tflite"
 echo "  Dashboard   : http://$(hostname -I | awk '{print $1}'):8501"
 echo "============================================"

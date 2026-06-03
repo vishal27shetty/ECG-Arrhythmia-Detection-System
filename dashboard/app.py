@@ -407,7 +407,7 @@ def main():
         if st.session_state.is_running:
             elapsed = time.time() - st.session_state.start_time
             remaining = st.session_state.session_duration - elapsed
-            st.success(f"🟢 Recording... {elapsed:.1f}s / {st.session_state.session_duration}s")
+            st.success(f"Recording... {elapsed:.1f}s / {st.session_state.session_duration}s")
             st.progress(min(1.0, elapsed / st.session_state.session_duration))
             st.info(f"⏱️ Time Remaining: {remaining:.1f}s")
             
@@ -435,7 +435,7 @@ def main():
         # Update data
         update_data()
         
-        st.header("📊 Live ECG Signal")
+        st.header("Live ECG Signal")
         
         # Check if we're getting enough data
         elapsed = time.time() - st.session_state.start_time
@@ -477,7 +477,7 @@ def main():
             results = st.session_state.last_session_results
             
             # Session Summary
-            st.header("📊 Session Analysis Results")
+            st.header("Session Analysis Results")
             
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -501,8 +501,8 @@ def main():
                 all_classes = {
                     'Normal': '✅',
                     'Supraventricular': '⚠️',
-                    'Ventricular': '🔴',
-                    'Fusion': '🔶',
+                    'Ventricular': '⚠️',
+                    'Fusion': '⚠️',
                     'Unknown': '❓'
                 }
                 

@@ -8,6 +8,7 @@ import serial.tools.list_ports
 import threading
 import queue
 import time
+import collections
 import numpy as np
 from typing import Optional, Tuple, List
 
@@ -37,7 +38,9 @@ class ECGSerialReader:
         # Serial connection
         self.serial_conn: Optional[serial.Serial] = None
         self.is_running = False
+        self.is_connected = False
         self.reader_thread: Optional[threading.Thread] = None
+        self._raw_history = collections.deque(maxlen=30)
         
         # Statistics
         self.total_samples = 0
@@ -131,6 +134,7 @@ class ECGSerialReader:
                 self.serial_conn.reset_input_buffer()
 
                 print(f"Connected to Arduino on {self.port} at {self.baudrate} baud")
+                self.is_connected = True
                 return True
 
             except serial.SerialException as e:
@@ -146,6 +150,7 @@ class ECGSerialReader:
         elif not available:
             hint = " Plug Arduino into USB and verify the board is powered."
 
+        self.is_connected = False
         self.last_error = (
             f"Could not open serial port. Tried: {tried_text}. "
             f"Available ports: {available_text}.{hint}"
@@ -170,7 +175,7 @@ class ECGSerialReader:
         """Background thread that reads serial data continuously"""
         while self.is_running:
             try:
-                if self.serial_conn and self.serial_conn.in_waiting > 0:
+                if self.serial_conn and self.serial_conn.is_open and self.serial_conn.in_waiting > 0:
                     # Read line from serial
                     line = self.serial_conn.readline().decode('utf-8', errors='ignore').strip()
                     
@@ -187,8 +192,21 @@ class ECGSerialReader:
                             lo_plus = int(parts[2])
                             lo_minus = int(parts[3])
                             
+                            # Update raw history for software leads-off detection
+                            self._raw_history.append(ecg_value)
+                            
+                            # Software leads-off fallback detection
+                            software_leads_off = False
+                            if len(self._raw_history) >= 30:
+                                val_range = max(self._raw_history) - min(self._raw_history)
+                                if val_range < 2:
+                                    software_leads_off = True
+                            
+                            if ecg_value <= 5 or ecg_value >= 1018:
+                                software_leads_off = True
+                            
                             # Check if leads are connected
-                            leads_off = (lo_plus == 1 or lo_minus == 1)
+                            leads_off = (lo_plus == 1 or lo_minus == 1 or software_leads_off)
                             
                             if leads_off:
                                 self.leads_off_count += 1
@@ -224,7 +242,14 @@ class ECGSerialReader:
                     
             except Exception as e:
                 print(f"Error reading serial data: {e}")
-                time.sleep(0.1)
+                self.is_connected = False
+                self.last_error = str(e)
+                try:
+                    if self.serial_conn:
+                        self.serial_conn.close()
+                except Exception:
+                    pass
+                time.sleep(1.0)
     
     def get_sample(self, timeout: float = 1.0) -> Optional[dict]:
         """
@@ -286,6 +311,7 @@ class ECGSerialReader:
     def stop_reading(self):
         """Stop reading data and close connection"""
         self.is_running = False
+        self.is_connected = False
         
         if self.reader_thread:
             self.reader_thread.join(timeout=2.0)
@@ -302,7 +328,8 @@ class ECGSerialReader:
             'dropped_samples': self.dropped_samples,
             'leads_off_count': self.leads_off_count,
             'queue_size': self.data_queue.qsize(),
-            'is_running': self.is_running
+            'is_running': self.is_running,
+            'is_connected': self.is_connected
         }
     
     def __enter__(self):

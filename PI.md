@@ -268,7 +268,7 @@ For example: `http://192.168.1.42:8501`
 You should see the ECG Arrhythmia Monitor dashboard with a
 "Running in Raspberry Pi mode" indicator.
 
----
+
 
 ## Step 10 — Record and Analyse
 

@@ -8,6 +8,7 @@ import serial.tools.list_ports
 import threading
 import queue
 import time
+import collections
 import numpy as np
 from typing import Optional, Tuple, List
 
@@ -37,38 +38,57 @@ class ECGSerialReader:
         # Serial connection
         self.serial_conn: Optional[serial.Serial] = None
         self.is_running = False
+        self.is_connected = False
         self.reader_thread: Optional[threading.Thread] = None
+        self._raw_history = collections.deque(maxlen=30)
         
         # Statistics
         self.total_samples = 0
         self.dropped_samples = 0
         self.leads_off_count = 0
+        self.last_error: Optional[str] = None
         
+    def list_available_ports(self) -> List[str]:
+        """Return all detected serial ports."""
+        return [port.device for port in serial.tools.list_ports.comports()]
+
     def auto_detect_port(self) -> Optional[str]:
         """
-        Automatically detect Arduino serial port
+        Automatically detect Arduino serial port.
+        Works on Windows (COMx), Linux / Raspberry Pi (/dev/ttyUSBx, /dev/ttyACMx).
         
         Returns:
             Port name if found, None otherwise
         """
-        ports = serial.tools.list_ports.comports()
-        
-        # Look for common Arduino identifiers
-        arduino_keywords = ['arduino', 'ch340', 'usb', 'acm']
-        
+        ports = list(serial.tools.list_ports.comports())
+        if not ports:
+            return None
+
+        arduino_keywords = ['arduino', 'ch340', 'ch341', 'cp210', 'ftdi', 'usb serial', 'acm']
+
         for port in ports:
-            port_info = (port.device + port.description + port.manufacturer).lower()
+            manufacturer = port.manufacturer or ''
+            port_info = (port.device + ' ' + port.description + ' ' + manufacturer).lower()
             for keyword in arduino_keywords:
                 if keyword in port_info:
                     print(f"Auto-detected Arduino on port: {port.device}")
                     return port.device
-        
-        # If no Arduino found, return first available port
-        if ports:
-            print(f"Using first available port: {ports[0].device}")
-            return ports[0].device
-        
-        return None
+
+        # On Linux/Pi: Uno/Leonardo usually appear as ttyACM*, CH340 clones as ttyUSB*
+        import platform
+        if platform.system() == 'Linux':
+            linux_ports = sorted(port.device for port in ports)
+            for device in linux_ports:
+                if device.startswith('/dev/ttyACM'):
+                    print(f"Using Linux serial port: {device}")
+                    return device
+            for device in linux_ports:
+                if device.startswith('/dev/ttyUSB'):
+                    print(f"Using Linux serial port: {device}")
+                    return device
+
+        print(f"Using first available port: {ports[0].device}")
+        return ports[0].device
     
     def connect(self) -> bool:
         """
@@ -77,34 +97,68 @@ class ECGSerialReader:
         Returns:
             True if connection successful, False otherwise
         """
-        try:
-            # Auto-detect port if not specified
-            if self.port is None:
-                self.port = self.auto_detect_port()
-                if self.port is None:
-                    print("Error: No serial ports found")
-                    return False
-            
-            # Open serial connection
-            self.serial_conn = serial.Serial(
-                port=self.port,
-                baudrate=self.baudrate,
-                timeout=1.0,
-                write_timeout=1.0
-            )
-            
-            # Wait for Arduino to reset
-            time.sleep(2)
-            
-            # Flush any existing data
-            self.serial_conn.reset_input_buffer()
-            
-            print(f"Connected to Arduino on {self.port} at {self.baudrate} baud")
-            return True
-            
-        except serial.SerialException as e:
-            print(f"Error connecting to serial port: {e}")
+        self.last_error = None
+        requested_port = self.port
+
+        # Resolve port: try requested first, then auto-detect
+        ports_to_try = []
+        if requested_port:
+            ports_to_try.append(requested_port)
+        detected = self.auto_detect_port()
+        if detected and detected not in ports_to_try:
+            ports_to_try.append(detected)
+
+        if not ports_to_try:
+            self.last_error = "No serial ports found. Check USB cable and Arduino power."
+            print(f"Error: {self.last_error}")
             return False
+
+        last_exception = None
+        for port in ports_to_try:
+            try:
+                if self.serial_conn and self.serial_conn.is_open:
+                    self.serial_conn.close()
+
+                self.serial_conn = serial.Serial(
+                    port=port,
+                    baudrate=self.baudrate,
+                    timeout=1.0,
+                    write_timeout=1.0
+                )
+                self.port = port
+
+                # Wait for Arduino to reset after DTR toggle
+                time.sleep(2)
+
+                # Flush any existing data
+                self.serial_conn.reset_input_buffer()
+
+                print(f"Connected to Arduino on {self.port} at {self.baudrate} baud")
+                self.is_connected = True
+                return True
+
+            except serial.SerialException as e:
+                last_exception = e
+                print(f"Error connecting to {port}: {e}")
+
+        available = self.list_available_ports()
+        available_text = ', '.join(available) if available else 'none detected'
+        tried_text = ', '.join(ports_to_try)
+        hint = ""
+        if last_exception and 'Permission denied' in str(last_exception):
+            hint = " Try: sudo usermod -aG dialout $USER (then log out/in), or run ./start_pi.sh."
+        elif not available:
+            hint = " Plug Arduino into USB and verify the board is powered."
+
+        self.is_connected = False
+        self.last_error = (
+            f"Could not open serial port. Tried: {tried_text}. "
+            f"Available ports: {available_text}.{hint}"
+        )
+        if last_exception:
+            self.last_error += f" Last error: {last_exception}"
+        print(f"Error connecting to serial port: {self.last_error}")
+        return False
     
     def start_reading(self):
         """Start reading data from Arduino in background thread"""
@@ -121,7 +175,7 @@ class ECGSerialReader:
         """Background thread that reads serial data continuously"""
         while self.is_running:
             try:
-                if self.serial_conn and self.serial_conn.in_waiting > 0:
+                if self.serial_conn and self.serial_conn.is_open and self.serial_conn.in_waiting > 0:
                     # Read line from serial
                     line = self.serial_conn.readline().decode('utf-8', errors='ignore').strip()
                     
@@ -138,8 +192,21 @@ class ECGSerialReader:
                             lo_plus = int(parts[2])
                             lo_minus = int(parts[3])
                             
+                            # Update raw history for software leads-off detection
+                            self._raw_history.append(ecg_value)
+                            
+                            # Software leads-off fallback detection
+                            software_leads_off = False
+                            if len(self._raw_history) >= 30:
+                                val_range = max(self._raw_history) - min(self._raw_history)
+                                if val_range < 2:
+                                    software_leads_off = True
+                            
+                            if ecg_value <= 5 or ecg_value >= 1018:
+                                software_leads_off = True
+                            
                             # Check if leads are connected
-                            leads_off = (lo_plus == 1 or lo_minus == 1)
+                            leads_off = (lo_plus == 1 or lo_minus == 1 or software_leads_off)
                             
                             if leads_off:
                                 self.leads_off_count += 1
@@ -175,7 +242,14 @@ class ECGSerialReader:
                     
             except Exception as e:
                 print(f"Error reading serial data: {e}")
-                time.sleep(0.1)
+                self.is_connected = False
+                self.last_error = str(e)
+                try:
+                    if self.serial_conn:
+                        self.serial_conn.close()
+                except Exception:
+                    pass
+                time.sleep(1.0)
     
     def get_sample(self, timeout: float = 1.0) -> Optional[dict]:
         """
@@ -237,6 +311,7 @@ class ECGSerialReader:
     def stop_reading(self):
         """Stop reading data and close connection"""
         self.is_running = False
+        self.is_connected = False
         
         if self.reader_thread:
             self.reader_thread.join(timeout=2.0)
@@ -253,7 +328,8 @@ class ECGSerialReader:
             'dropped_samples': self.dropped_samples,
             'leads_off_count': self.leads_off_count,
             'queue_size': self.data_queue.qsize(),
-            'is_running': self.is_running
+            'is_running': self.is_running,
+            'is_connected': self.is_connected
         }
     
     def __enter__(self):
@@ -301,5 +377,9 @@ def test_serial_reader():
 
 if __name__ == "__main__":
     test_serial_reader()
+
+
+
+
 
 

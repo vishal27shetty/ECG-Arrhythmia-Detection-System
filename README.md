@@ -1,5 +1,7 @@
 # ECG Arrhythmia Detection System
 
+[![GitHub](https://img.shields.io/badge/GitHub-Repository-blue)](https://github.com/vishal27shetty/ECG-Arrhythmia-Detection-System)
+
 Real-time ECG monitoring system with AI-powered arrhythmia classification using Bidirectional LSTM neural networks.
 
 ## 🎯 Project Overview
@@ -7,34 +9,65 @@ Real-time ECG monitoring system with AI-powered arrhythmia classification using 
 This system provides:
 - **Real-time ECG acquisition** from AD8232 sensor via Arduino Uno
 - **Edge processing** with digital signal filtering
-- **AI classification** of 5 arrhythmia types using Bi-LSTM model
-- **Live visualization** dashboard with alerts
-- **High accuracy** trained on MIT-BIH Arrhythmia Database
+- **AI classification** of 5 arrhythmia types using CNN-LSTM model
+- **Batch processing** dashboard with live waveform display
+- **High accuracy** trained on MIT-BIH Arrhythmia Database (70.7% test accuracy)
+
+## 📊 Dashboard Approach: Live Display + Batch Processing
+
+### Why Batch Processing?
+Instead of real-time classification during recording, we use a **Live Display + Batch Processing** approach:
+
+**During Recording (Live Display):**
+- Shows live ECG waveform only
+- No classification overhead
+- Fixed duration sessions (30-300 seconds)
+- Auto-stop when duration reached
+
+**After Recording (Batch Processing):**
+- Process entire signal at once
+- More accurate R-peak detection (full signal context)
+- No duplicate detections
+- Beat-by-beat classification
+- Comprehensive analysis & statistics
+- Saved to JSON logs
+
+**Benefits:**
+- ✅ **More Accurate**: Full signal context for peak detection
+- ✅ **No Duplicates**: Single-pass processing
+- ✅ **Consistent Results**: Same input = same output
+- ✅ **Faster UI**: No real-time inference overhead
+- ✅ **Better Debugging**: Complete signal analysis
 
 ## 📁 Project Structure
 
 ```
 FInal Year Project/
 ├── arduino/
-│   └── ecg_acquisition.ino         # Arduino code for ECG acquisition
+│   └── ecg_acquisition.ino          # Arduino code for ECG acquisition
 ├── data/
-│   ├── mit_bih/                    # MIT-BIH dataset (downloaded)
-│   └── recordings/                 # Local test recordings
+│   ├── mit_bih/                     # MIT-BIH dataset (downloaded)
+│   └── recordings/                  # Local test recordings
 ├── models/
-│   ├── dataset_preparation.py      # MIT-BIH data preprocessing
-│   ├── model_architecture.py       # Bi-LSTM model definition
-│   ├── train_bilstm.py             # Training script
-│   └── trained_model.h5            # Trained model (after training)
+│   ├── dataset_preparation.py       # MIT-BIH data preprocessing
+│   ├── model_architecture.py        # Bi-LSTM model definition
+│   ├── train_bilstm.py              # Training script
+│   ├── best_model.h5                # Trained Keras model (desktop)
+│   └── best_model.tflite            # TFLite model  (Raspberry Pi)
 ├── preprocessing/
-│   ├── filters.py                  # DSP filters
-│   └── signal_processing.py        # R-peak detection, beat segmentation
+│   ├── filters.py                   # DSP filters
+│   └── signal_processing.py         # R-peak detection, beat segmentation
 ├── realtime/
-│   ├── serial_reader.py            # Arduino serial communication
-│   └── inference_engine.py         # Real-time classification
+│   ├── serial_reader.py             # Arduino serial communication
+│   ├── batch_processor.py           # Batch inference (Keras + TFLite)
+│   └── inference_engine.py          # Real-time classification
 ├── dashboard/
-│   └── app.py                      # Streamlit dashboard
-├── requirements.txt                # Python dependencies
-└── README.md                       # This file
+│   └── app.py                       # Streamlit dashboard (desktop + Pi)
+├── convert_model_to_tflite.py       # Keras → TFLite converter
+├── start_pi.sh                      # One-command Pi launcher
+├── requirements.txt                 # Desktop dependencies
+├── requirements_pi.txt              # Raspberry Pi dependencies (lightweight)
+└── README.md                        # This file
 ```
 
 ## 🔧 Hardware Setup
@@ -73,7 +106,7 @@ LO-         →  Digital Pin 11
 4. Select correct **Port**
 5. Click **Upload** button
 
-### 2. Python Environment Setup
+### 2. Python Environment Setup (Desktop)
 
 ```bash
 # Create virtual environment
@@ -101,6 +134,72 @@ This will:
 - Extract and label beats
 - Create train/test split
 - Save processed data
+
+## 🍓 Raspberry Pi Deployment
+
+The system can run on a **Raspberry Pi 4 (2 GB+ RAM)** or newer for portable,
+bedside ECG monitoring. The Pi uses **TensorFlow Lite** instead of full
+TensorFlow, so inference is fast and memory-friendly.
+
+### Pi Setup — Step by Step
+
+#### 1. Convert the model (on your desktop)
+
+```bash
+# On your laptop/desktop where TensorFlow is installed
+python convert_model_to_tflite.py
+# Creates models/best_model.tflite
+```
+
+#### 2. Copy the project to the Pi
+
+```bash
+scp -r "FInal Year Project" pi@<PI_IP>:~/ecg-project
+```
+
+#### 3. Install dependencies on the Pi
+
+```bash
+ssh pi@<PI_IP>
+cd ~/ecg-project
+
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements_pi.txt
+```
+
+#### 4. Connect hardware and run
+
+```bash
+# Plug Arduino into Pi USB port, then:
+chmod +x start_pi.sh
+./start_pi.sh              # auto-detect serial port
+# or
+./start_pi.sh /dev/ttyACM0 # specify port explicitly
+```
+
+Open `http://<PI_IP>:8501` on any device on the same network.
+
+### Pi Hardware Wiring
+
+```
+Raspberry Pi USB  ──►  Arduino Uno USB
+Arduino A0        ◄──  AD8232 OUTPUT
+Arduino D10       ◄──  AD8232 LO+
+Arduino D11       ◄──  AD8232 LO-
+Arduino GND       ──►  AD8232 GND
+Arduino 3.3V      ──►  AD8232 3.3V
+```
+
+### Pi Tips
+
+- Use a **Raspberry Pi 4 (4 GB)** or **Pi 5** for best performance
+- A heat-sink or fan is recommended during long sessions
+- The dashboard auto-detects Pi mode via CPU architecture; you can also
+  force it with `export ECGPI=1`
+- Use `requirements_pi.txt` — it uses `ai-edge-litert` (not deprecated `tflite-runtime`)
+- **Python 3.12+ error `No module named 'imp'`?** Reinstall deps: `pip install -r requirements_pi.txt`
+- Serial permission issues? Run `sudo usermod -aG dialout $USER` and reboot
 
 ## 🚀 Training the Model
 
@@ -229,6 +328,46 @@ The dashboard will open in your browser at `http://localhost:8501`
 4. **Monitor**: View live ECG and classifications
 
 5. **Stop System**: Click ⏹️ Stop button when done
+   - **Automatic Session Analysis** is generated
+   - Detailed logs saved to `logs/` folder
+   - View comprehensive session statistics on-screen
+
+### Session Analysis & Logging
+
+When you stop the monitoring system, the following happens automatically:
+
+**Comprehensive Session Analysis:**
+- Duration and total beats analyzed
+- Beat classification distribution with percentages
+- Heart rate statistics (mean, min, max, variability)
+- Confidence analysis per class
+- Alert summary and history
+- Overall quality assessment with specific issues detected
+- Actionable recommendations for improvement
+
+**Automatic Log Generation:**
+
+The system saves two log files in the `logs/` directory:
+
+1. **JSON Log** (`ecg_session_YYYYMMDD_HHMMSS.json`):
+   - Complete structured data
+   - Beat-by-beat classifications with timestamps
+   - Full probability distributions
+   - Smoothing information
+   - All session statistics
+
+2. **Human-Readable Summary** (`ecg_session_YYYYMMDD_HHMMSS_summary.txt`):
+   - Easy-to-read text format
+   - Session overview
+   - Classification breakdown
+   - Quality assessment
+   - Recommendations
+
+**Quality Indicators:**
+- **Excellent**: High confidence, stable heart rate, good signal quality
+- **Good**: Acceptable performance with minor issues
+- **Fair**: Low confidence or signal quality issues detected
+- **Poor**: Multiple issues requiring attention
 
 ### Understanding Alert Thresholds
 
@@ -409,7 +548,37 @@ ECG Arrhythmia Detection System
 - [ ] Electrodes attached correctly
 - [ ] System monitoring live ECG
 
-**Need Help?** Check the Troubleshooting section above.
+## 🔧 Troubleshooting
+
+### Problem: Very Few Beats Detected (1-3 beats in 30+ seconds)
+
+**Symptoms:**
+- Dashboard shows only 1-3 beats after processing
+- "Very few peaks detected" warning in console
+- Heart rate < 30 BPM
+
+**Causes & Solutions:**
+
+| Cause | Solution |
+|-------|----------|
+| **Poor electrode contact** | • Clean skin with alcohol<br>• Press electrodes firmly<br>• Use electrode gel |
+| **Wrong electrode placement** | • RA: Right wrist/below right clavicle<br>• LA: Left wrist/below left clavicle<br>• LL: Left ankle/lower left abdomen |
+| **Weak signal** | • Check 3.3V power to AD8232<br>• Verify LOD pins show connection<br>• Try different electrode positions |
+| **Low data rate (<80%)** | • Check Arduino USB connection<br>• Verify 115200 baud rate<br>• Restart serial connection |
+| **Noisy signal** | • Keep cables still<br>• Move away from power sources<br>• Check ground connection |
+
+**Check During Recording:**
+- ✅ **Data Rate**: Should be 95-100%
+- ✅ **Signal Quality**: Should show "Good"
+- ✅ **Samples**: Should increase steadily
+- ✅ **Waveform**: Should show clear, repeating peaks
+
+**Recommendations:**
+- Use 30-60 second recordings (not less than 15s)
+- Test with finger on electrodes first (should see muscle noise)
+- View Arduino Serial Monitor to verify data is being sent
+
+---
 
 **Good luck with your project! ❤️**
 #   E C G - A r r h y t h m i a - D e t e c t i o n - S y s t e m 
